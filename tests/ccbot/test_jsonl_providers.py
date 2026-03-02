@@ -728,6 +728,69 @@ class TestCodexDiscoverTranscript:
         assert event.session_id == "uuid-fresh"
 
 
+class TestCodexDiscoverTranscriptMaxAge:
+    def _write_session(
+        self, sessions_dir: Path, date_parts: str, name: str, session_id: str, cwd: str
+    ) -> Path:
+        day_dir = sessions_dir / date_parts
+        day_dir.mkdir(parents=True, exist_ok=True)
+        fpath = day_dir / f"{name}.jsonl"
+        meta = {"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}
+        fpath.write_text(json.dumps(meta) + "\n")
+        return fpath
+
+    def test_max_age_zero_ignores_staleness(self, tmp_path: Path) -> None:
+        import os
+
+        sessions_dir = tmp_path / ".codex" / "sessions"
+        fpath = self._write_session(
+            sessions_dir, "2026/03/01", "old-session", "uuid-old", "/my/project"
+        )
+        old_time = fpath.stat().st_mtime - 300
+        os.utime(fpath, (old_time, old_time))
+
+        codex = CodexProvider()
+        with patch.object(Path, "home", return_value=tmp_path):
+            event = codex.discover_transcript("/my/project", "ccbot:@7", max_age=0)
+        assert event is not None
+        assert event.session_id == "uuid-old"
+
+    def test_max_age_none_uses_default(self, tmp_path: Path) -> None:
+        import os
+
+        sessions_dir = tmp_path / ".codex" / "sessions"
+        fpath = self._write_session(
+            sessions_dir, "2026/03/01", "old-session", "uuid-old", "/my/project"
+        )
+        old_time = fpath.stat().st_mtime - 300
+        os.utime(fpath, (old_time, old_time))
+
+        codex = CodexProvider()
+        with patch.object(Path, "home", return_value=tmp_path):
+            event = codex.discover_transcript("/my/project", "ccbot:@7", max_age=None)
+        assert event is None
+
+    def test_explicit_max_age_respected(self, tmp_path: Path) -> None:
+        import os
+
+        sessions_dir = tmp_path / ".codex" / "sessions"
+        fpath = self._write_session(
+            sessions_dir, "2026/03/01", "session", "uuid-abc", "/my/project"
+        )
+        old_time = fpath.stat().st_mtime - 200
+        os.utime(fpath, (old_time, old_time))
+
+        codex = CodexProvider()
+        with patch.object(Path, "home", return_value=tmp_path):
+            assert (
+                codex.discover_transcript("/my/project", "ccbot:@7", max_age=100)
+                is None
+            )
+            event = codex.discover_transcript("/my/project", "ccbot:@7", max_age=300)
+        assert event is not None
+        assert event.session_id == "uuid-abc"
+
+
 class TestHooklessDiscoverTranscriptDefault:
     def test_gemini_returns_none(self) -> None:
         gemini = GeminiProvider()

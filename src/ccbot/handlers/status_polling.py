@@ -836,36 +836,90 @@ async def _probe_topic_existence(bot: Bot) -> None:
 async def _maybe_discover_transcript(window_id: str) -> None:
     """Discover and register transcript for hookless providers (Codex, Gemini).
 
-    Runs once per window: skips if the window already has a session_id or if
-    the provider supports hooks. When a transcript is found, writes a synthetic
-    session_map entry so the session monitor starts tracking it.
+    Runs once per window: skips if the window already has a session_id.
+    When a transcript is found, writes a synthetic session_map entry so the
+    session monitor starts tracking it.
+
+    Provider resolution logic:
+    - If ``state.provider_name`` is explicitly set AND provider has hooks,
+      trust hook delivery and return early.
+    - If ``state.provider_name`` is empty (auto-detection failed, e.g. Codex
+      running under ``bun``), try all hookless providers' ``discover_transcript``
+      to find a match.
+
+    For externally-created windows, cwd may be empty (no hook to populate it).
+    Falls back to the tmux window's pane_current_path.
     """
+    from ..providers import registry
+
     state = session_manager.window_states.get(window_id)
-    if not state or state.session_id or not state.cwd:
+    if not state or state.session_id:
         return
-    provider = get_provider_for_window(window_id)
-    if provider.capabilities.supports_hook:
-        return
+
+    # If provider is explicitly set and supports hooks, trust hook delivery
+    if state.provider_name:
+        provider = get_provider_for_window(window_id)
+        if provider.capabilities.supports_hook:
+            return
+
+    # Ensure cwd is available (fall back to tmux pane path)
+    if not state.cwd:
+        w = await tmux_manager.find_window_by_id(window_id)
+        if not w or not w.cwd:
+            return
+        state.cwd = w.cwd
+        session_manager.set_window_provider(window_id, state.provider_name or "")
+
+    # Determine which providers to try
+    if state.provider_name:
+        # Explicit hookless provider — try only that one
+        provider = get_provider_for_window(window_id)
+        providers_to_try = [(provider.capabilities.name, provider)]
+    else:
+        # Detection failed — check pane is alive (skip dead shells)
+        w = await tmux_manager.find_window_by_id(window_id)
+        if w and is_shell_prompt(w.pane_current_command):
+            return
+        # Try all hookless providers
+        providers_to_try = [
+            (name, registry.get(name))
+            for name in registry.provider_names()
+            if not registry.get(name).capabilities.supports_hook
+        ]
+
+    # Disable staleness check if pane process is alive
+    w = await tmux_manager.find_window_by_id(window_id)
+    pane_alive = w is not None and not is_shell_prompt(w.pane_current_command)
+
     window_key = f"{config.tmux_session_name}:{window_id}"
-    event = await asyncio.to_thread(provider.discover_transcript, state.cwd, window_key)
-    if event:
-        # In-memory update on event loop (touches asyncio timer handles)
-        session_manager.register_hookless_session(
-            window_id=window_id,
-            session_id=event.session_id,
-            cwd=event.cwd,
-            transcript_path=event.transcript_path,
-            provider_name=provider.capabilities.name,
-        )
-        # File-locked session_map.json write in thread (blocking I/O)
-        await asyncio.to_thread(
-            session_manager.write_hookless_session_map,
-            window_id=window_id,
-            session_id=event.session_id,
-            cwd=event.cwd,
-            transcript_path=event.transcript_path,
-            provider_name=provider.capabilities.name,
-        )
+    for provider_name, provider in providers_to_try:
+        from ..providers.codex import CodexProvider
+
+        if pane_alive and isinstance(provider, CodexProvider):
+            event = await asyncio.to_thread(
+                provider.discover_transcript, state.cwd, window_key, max_age=0
+            )
+        else:
+            event = await asyncio.to_thread(
+                provider.discover_transcript, state.cwd, window_key
+            )
+        if event:
+            session_manager.register_hookless_session(
+                window_id=window_id,
+                session_id=event.session_id,
+                cwd=event.cwd,
+                transcript_path=event.transcript_path,
+                provider_name=provider_name,
+            )
+            await asyncio.to_thread(
+                session_manager.write_hookless_session_map,
+                window_id=window_id,
+                session_id=event.session_id,
+                cwd=event.cwd,
+                transcript_path=event.transcript_path,
+                provider_name=provider_name,
+            )
+            return
 
 
 async def status_poll_loop(bot: Bot) -> None:

@@ -247,12 +247,21 @@ class CodexProvider(JsonlProvider):
         return None
 
     def discover_transcript(
-        self, cwd: str, window_key: str
+        self,
+        cwd: str,
+        window_key: str,
+        *,
+        max_age: float | None = None,
     ) -> SessionStartEvent | None:
         """Scan ~/.codex/sessions/ for the most recent transcript matching cwd.
 
         Codex transcript path: ~/.codex/sessions/YYYY/MM/DD/<name>-<ts>-<uuid>.jsonl
         First line: {"type": "session_meta", "payload": {"id": "<uuid>", "cwd": "..."}}
+
+        Args:
+            max_age: Maximum transcript age in seconds. ``None`` uses the
+                default ``_TRANSCRIPT_MAX_AGE_SECS`` (120s). Pass ``0`` or
+                negative to disable the age check entirely.
         """
         sessions_dir = Path.home() / ".codex" / "sessions"
         if not sessions_dir.is_dir():
@@ -260,11 +269,13 @@ class CodexProvider(JsonlProvider):
 
         import time
 
+        age_limit = _TRANSCRIPT_MAX_AGE_SECS if max_age is None else max_age
+
         jsonl_files = _collect_codex_sessions(sessions_dir)
         now = time.time()
         resolved_cwd = str(Path(cwd).resolve())
         for mtime, fpath in jsonl_files[:20]:
-            if now - mtime > _TRANSCRIPT_MAX_AGE_SECS:
+            if age_limit > 0 and now - mtime > age_limit:
                 break  # sorted newest-first; remaining are all older
             meta = _read_codex_session_meta(fpath)
             if not meta:

@@ -838,13 +838,53 @@ class TestMaybeDiscoverTranscript:
         # Should not call register
         mock_sm.register_hookless_session.assert_not_called()
 
-    async def test_skips_when_no_cwd(self) -> None:
+    async def test_skips_when_no_cwd_and_no_tmux_window(self) -> None:
         from ccbot.handlers.status_polling import _maybe_discover_transcript
 
-        with patch("ccbot.handlers.status_polling.session_manager") as mock_sm:
+        with (
+            patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        ):
             mock_sm.window_states = {"@7": MagicMock(session_id="", cwd="")}
+            mock_tmux.find_window_by_id = AsyncMock(return_value=None)
             await _maybe_discover_transcript("@7")
         mock_sm.register_hookless_session.assert_not_called()
+
+    async def test_falls_back_to_tmux_cwd_when_state_cwd_empty(self) -> None:
+        from ccbot.handlers.status_polling import _maybe_discover_transcript
+        from ccbot.providers.base import SessionStartEvent
+
+        mock_provider = MagicMock()
+        mock_provider.capabilities.supports_hook = False
+        mock_provider.capabilities.name = "codex"
+        event = SessionStartEvent(
+            session_id="uuid-xyz",
+            cwd="/my/project",
+            transcript_path="/path/to/transcript.jsonl",
+            window_key="ccbot:@7",
+        )
+        mock_provider.discover_transcript.return_value = event
+
+        mock_state = MagicMock(session_id="", cwd="", provider_name="codex")
+        mock_window = MagicMock(cwd="/my/project", pane_current_command="bun")
+
+        with (
+            patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccbot.handlers.status_polling.get_provider_for_window",
+                return_value=mock_provider,
+            ),
+            patch("ccbot.handlers.status_polling.config") as mock_config,
+        ):
+            mock_sm.window_states = {"@7": mock_state}
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            mock_config.tmux_session_name = "ccbot"
+            await _maybe_discover_transcript("@7")
+
+        assert mock_state.cwd == "/my/project"
+        mock_sm.set_window_provider.assert_called_once_with("@7", "codex")
+        mock_sm.register_hookless_session.assert_called_once()
 
     async def test_skips_when_provider_has_hooks(self) -> None:
         from ccbot.handlers.status_polling import _maybe_discover_transcript
@@ -858,7 +898,9 @@ class TestMaybeDiscoverTranscript:
                 return_value=mock_provider,
             ),
         ):
-            mock_sm.window_states = {"@7": MagicMock(session_id="", cwd="/proj")}
+            mock_sm.window_states = {
+                "@7": MagicMock(session_id="", cwd="/proj", provider_name="claude")
+            }
             await _maybe_discover_transcript("@7")
         mock_sm.register_hookless_session.assert_not_called()
 
@@ -892,9 +934,14 @@ class TestMaybeDiscoverTranscript:
                 return_value=mock_provider,
             ),
             patch("ccbot.handlers.status_polling.config") as mock_config,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
         ):
-            mock_sm.window_states = {"@7": MagicMock(session_id="", cwd="/my/project")}
+            mock_sm.window_states = {
+                "@7": MagicMock(session_id="", cwd="/my/project", provider_name="codex")
+            }
             mock_config.tmux_session_name = "ccbot"
+            mock_window = MagicMock(pane_current_command="bun")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             await _maybe_discover_transcript("@7")
 
         mock_sm.register_hookless_session.assert_called_once_with(
@@ -926,9 +973,15 @@ class TestMaybeDiscoverTranscript:
                 return_value=mock_provider,
             ),
             patch("ccbot.handlers.status_polling.config") as mock_config,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
         ):
-            mock_sm.window_states = {"@7": MagicMock(session_id="", cwd="/proj")}
+            mock_sm.window_states = {
+                "@7": MagicMock(session_id="", cwd="/proj", provider_name="codex")
+            }
             mock_config.tmux_session_name = "ccbot"
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(pane_current_command="bun")
+            )
             await _maybe_discover_transcript("@7")
 
         mock_sm.register_hookless_session.assert_not_called()
@@ -958,9 +1011,14 @@ class TestMaybeDiscoverTranscript:
             ),
             patch("ccbot.handlers.status_polling.config") as mock_config,
             patch("ccbot.handlers.status_polling.asyncio") as mock_asyncio,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
         ):
-            mock_sm.window_states = {"@7": MagicMock(session_id="", cwd="/my/project")}
+            mock_sm.window_states = {
+                "@7": MagicMock(session_id="", cwd="/my/project", provider_name="codex")
+            }
             mock_config.tmux_session_name = "ccbot"
+            mock_window = MagicMock(pane_current_command="bun")
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
             mock_asyncio.to_thread = AsyncMock(side_effect=[event, None])
             await _maybe_discover_transcript("@7")
 
@@ -970,5 +1028,81 @@ class TestMaybeDiscoverTranscript:
         assert discover_call.args[0] == mock_provider.discover_transcript
         write_call = mock_asyncio.to_thread.call_args_list[1]
         assert write_call.args[0] == mock_sm.write_hookless_session_map
-        # register_hookless_session called directly on event loop (not via to_thread)
         mock_sm.register_hookless_session.assert_called_once()
+
+    async def test_tries_hookless_providers_when_provider_name_empty(self) -> None:
+        """When provider_name is empty (detection failed), try all hookless providers."""
+        from ccbot.handlers.status_polling import _maybe_discover_transcript
+        from ccbot.providers.base import SessionStartEvent
+
+        event = SessionStartEvent(
+            session_id="uuid-found",
+            cwd="/proj",
+            transcript_path="/path/to/transcript.jsonl",
+            window_key="ccbot:@7",
+        )
+
+        mock_codex = MagicMock()
+        mock_codex.capabilities.supports_hook = False
+        mock_codex.capabilities.name = "codex"
+        mock_codex.discover_transcript.return_value = event
+
+        mock_gemini = MagicMock()
+        mock_gemini.capabilities.supports_hook = False
+        mock_gemini.capabilities.name = "gemini"
+        mock_gemini.discover_transcript.return_value = None
+
+        mock_claude = MagicMock()
+        mock_claude.capabilities.supports_hook = True
+        mock_claude.capabilities.name = "claude"
+
+        mock_registry = MagicMock()
+        mock_registry.provider_names.return_value = ["claude", "codex", "gemini"]
+
+        def mock_get(name: str) -> MagicMock:
+            return {"claude": mock_claude, "codex": mock_codex, "gemini": mock_gemini}[
+                name
+            ]
+
+        mock_registry.get = mock_get
+
+        mock_window = MagicMock(pane_current_command="bun")
+
+        with (
+            patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch("ccbot.handlers.status_polling.config") as mock_config,
+            patch("ccbot.providers.registry", mock_registry),
+        ):
+            mock_sm.window_states = {
+                "@7": MagicMock(session_id="", cwd="/proj", provider_name="")
+            }
+            mock_config.tmux_session_name = "ccbot"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            await _maybe_discover_transcript("@7")
+
+        mock_sm.register_hookless_session.assert_called_once_with(
+            window_id="@7",
+            session_id="uuid-found",
+            cwd="/proj",
+            transcript_path="/path/to/transcript.jsonl",
+            provider_name="codex",
+        )
+
+    async def test_skips_hookless_fallback_when_pane_is_shell(self) -> None:
+        """When provider_name is empty and pane is a shell, skip discovery."""
+        from ccbot.handlers.status_polling import _maybe_discover_transcript
+
+        mock_window = MagicMock(pane_current_command="bash")
+
+        with (
+            patch("ccbot.handlers.status_polling.session_manager") as mock_sm,
+            patch("ccbot.handlers.status_polling.tmux_manager") as mock_tmux,
+        ):
+            mock_sm.window_states = {
+                "@7": MagicMock(session_id="", cwd="/proj", provider_name="")
+            }
+            mock_tmux.find_window_by_id = AsyncMock(return_value=mock_window)
+            await _maybe_discover_transcript("@7")
+
+        mock_sm.register_hookless_session.assert_not_called()

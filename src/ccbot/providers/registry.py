@@ -33,6 +33,10 @@ class ProviderRegistry:
         self._instances.pop(name, None)  # invalidate cached instance
         logger.debug("Registered provider %r", name)
 
+    def provider_names(self) -> list[str]:
+        """Return all registered provider names."""
+        return list(self._providers)
+
     def is_valid(self, name: str) -> bool:
         """Return True if *name* is a registered provider."""
         return name in self._providers

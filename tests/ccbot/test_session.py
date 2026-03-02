@@ -687,3 +687,117 @@ class TestWriteHooklessSessionMap:
         assert session_map_file.exists()
         raw = json.loads(session_map_file.read_text())
         assert "ccbot:@7" in raw
+
+
+class TestAuditState:
+    def test_clean_state(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@1")
+        mgr.window_display_names["@1"] = "proj"
+        result = mgr.audit_state(live_window_ids={"@1"}, live_windows=[("@1", "proj")])
+        assert not result.has_issues
+        assert result.total_bindings == 1
+        assert result.live_binding_count == 1
+
+    def test_ghost_binding(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 1, "@7")
+        mgr.window_display_names["@7"] = "dead"
+        result = mgr.audit_state(live_window_ids=set(), live_windows=[])
+        assert result.has_issues
+        ghost = [i for i in result.issues if i.category == "ghost_binding"]
+        assert len(ghost) == 1
+        assert not ghost[0].fixable
+
+    def test_orphaned_display_name(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@9"] = "orphan"
+        result = mgr.audit_state(live_window_ids=set(), live_windows=[])
+        orphans = [i for i in result.issues if i.category == "orphaned_display_name"]
+        assert len(orphans) == 1
+        assert orphans[0].fixable
+
+    def test_orphaned_group_chat_id(self, mgr: SessionManager) -> None:
+        mgr.group_chat_ids["100:42"] = -999
+        result = mgr.audit_state(live_window_ids=set(), live_windows=[])
+        orphans = [i for i in result.issues if i.category == "orphaned_group_chat_id"]
+        assert len(orphans) == 1
+        assert orphans[0].fixable
+
+    def test_stale_offset(self, mgr: SessionManager) -> None:
+        mgr.user_window_offsets[100] = {"@99": 1234}
+        result = mgr.audit_state(live_window_ids=set(), live_windows=[])
+        stale = [i for i in result.issues if i.category == "stale_offset"]
+        assert len(stale) == 1
+        assert stale[0].fixable
+
+    def test_display_name_drift(self, mgr: SessionManager) -> None:
+        mgr.window_display_names["@1"] = "old-name"
+        result = mgr.audit_state(
+            live_window_ids={"@1"}, live_windows=[("@1", "new-name")]
+        )
+        drift = [i for i in result.issues if i.category == "display_name_drift"]
+        assert len(drift) == 1
+        assert drift[0].fixable
+
+    def test_stale_window_state(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "ccbot.session.config.session_map_file", tmp_path / "empty.json"
+        )
+        monkeypatch.setattr("ccbot.session.config.tmux_session_name", "ccbot")
+        mgr.window_states["@5"] = WindowState(session_id="old", cwd="/tmp")
+        result = mgr.audit_state(live_window_ids=set(), live_windows=[])
+        stale = [i for i in result.issues if i.category == "stale_window_state"]
+        assert len(stale) == 1
+        assert stale[0].fixable
+
+
+class TestPruneStaleOffsets:
+    def test_removes_unknown_windows(self, mgr: SessionManager) -> None:
+        mgr.user_window_offsets[100] = {"@1": 100, "@99": 200}
+        changed = mgr.prune_stale_offsets(known_window_ids={"@1"})
+        assert changed
+        assert "@99" not in mgr.user_window_offsets[100]
+        assert "@1" in mgr.user_window_offsets[100]
+
+    def test_removes_empty_user_entry(self, mgr: SessionManager) -> None:
+        mgr.user_window_offsets[100] = {"@99": 200}
+        changed = mgr.prune_stale_offsets(known_window_ids=set())
+        assert changed
+        assert 100 not in mgr.user_window_offsets
+
+    def test_noop_when_nothing_stale(self, mgr: SessionManager) -> None:
+        mgr.user_window_offsets[100] = {"@1": 100}
+        changed = mgr.prune_stale_offsets(known_window_ids={"@1"})
+        assert not changed
+
+
+class TestPruneStaleWindowStates:
+    @pytest.fixture(autouse=True)
+    def _empty_session_map(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "ccbot.session.config.session_map_file", tmp_path / "empty.json"
+        )
+        monkeypatch.setattr("ccbot.session.config.tmux_session_name", "ccbot")
+
+    def test_removes_unbound_dead_states(self, mgr: SessionManager) -> None:
+        mgr.window_states["@5"] = WindowState(session_id="old", cwd="/tmp")
+        changed = mgr.prune_stale_window_states(live_window_ids=set())
+        assert changed
+        assert "@5" not in mgr.window_states
+
+    def test_keeps_bound_states(self, mgr: SessionManager) -> None:
+        mgr.window_states["@1"] = WindowState(session_id="s1", cwd="/tmp")
+        mgr.bind_thread(100, 1, "@1")
+        changed = mgr.prune_stale_window_states(live_window_ids=set())
+        assert not changed
+        assert "@1" in mgr.window_states
+
+    def test_keeps_live_states(self, mgr: SessionManager) -> None:
+        mgr.window_states["@1"] = WindowState(session_id="s1", cwd="/tmp")
+        changed = mgr.prune_stale_window_states(live_window_ids={"@1"})
+        assert not changed
+        assert "@1" in mgr.window_states
+
+    def test_noop_when_nothing_stale(self, mgr: SessionManager) -> None:
+        changed = mgr.prune_stale_window_states(live_window_ids=set())
+        assert not changed

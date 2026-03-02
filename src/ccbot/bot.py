@@ -79,6 +79,8 @@ from .handlers.callback_data import (
     CB_STATUS_ESC,
     CB_STATUS_NOTIFY,
     CB_STATUS_SCREENSHOT,
+    CB_SYNC_DISMISS,
+    CB_SYNC_FIX,
     CB_WIN_BIND,
     CB_WIN_CANCEL,
     CB_WIN_NEW,
@@ -103,6 +105,11 @@ from .handlers.sessions_dashboard import (
     handle_sessions_kill_confirm,
     handle_sessions_refresh,
     sessions_command,
+)
+from .handlers.sync_command import (
+    handle_sync_dismiss,
+    handle_sync_fix,
+    sync_command,
 )
 from .handlers.upgrade import upgrade_command
 from .handlers.interactive_ui import (
@@ -661,6 +668,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await handle_sessions_kill(query, user.id, window_id)
         await query.answer()
 
+    # Sync command
+    elif data == CB_SYNC_FIX:
+        await handle_sync_fix(query)
+        await query.answer("Fixed")
+    elif data == CB_SYNC_DISMISS:
+        await handle_sync_dismiss(query)
+        await query.answer("Dismissed")
+
 
 # --- Streaming response / notifications ---
 
@@ -955,7 +970,7 @@ async def post_init(application: Application) -> None:
                         len(missing),
                         ", ".join(missing),
                     )
-            except json.JSONDecodeError, OSError:
+            except (json.JSONDecodeError, OSError):  # fmt: skip
                 logger.warning(
                     "Claude Code hooks not installed. Run: ccbot hook --install"
                 )
@@ -1075,6 +1090,7 @@ def create_bot() -> Application:
     application.add_handler(
         CommandHandler("panes", panes_command, filters=_group_filter)
     )
+    application.add_handler(CommandHandler("sync", sync_command, filters=_group_filter))
     application.add_handler(CallbackQueryHandler(callback_handler))
     # Topic closed event — unbind window (kept alive for rebinding)
     application.add_handler(

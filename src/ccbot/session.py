@@ -113,6 +113,32 @@ class WindowState:
 
 
 @dataclass
+class AuditIssue:
+    """A single issue found during state audit."""
+
+    category: str  # ghost_binding | orphaned_display_name | orphaned_group_chat_id | stale_window_state | stale_offset | display_name_drift
+    detail: str
+    fixable: bool
+
+
+@dataclass
+class AuditResult:
+    """Result of a state audit."""
+
+    issues: list[AuditIssue]
+    total_bindings: int
+    live_binding_count: int
+
+    @property
+    def fixable_count(self) -> int:
+        return sum(1 for i in self.issues if i.fixable)
+
+    @property
+    def has_issues(self) -> bool:
+        return len(self.issues) > 0
+
+
+@dataclass
 class ClaudeSession:
     """Information about a Claude Code session."""
 
@@ -374,7 +400,7 @@ class SessionManager:
                         )
                         await self.load_session_map()
                         return True
-            except json.JSONDecodeError, OSError:
+            except (json.JSONDecodeError, OSError):  # fmt: skip
                 pass
             await asyncio.sleep(interval)
         logger.warning(
@@ -436,7 +462,7 @@ class SessionManager:
             return
         try:
             raw = json.loads(config.session_map_file.read_text())
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):  # fmt: skip
             return
 
         prefix = f"{config.tmux_session_name}:"
@@ -465,6 +491,189 @@ class SessionManager:
         if changed_state:
             self._save_state()
 
+    def _get_session_map_window_ids(self) -> set[str]:
+        """Read session_map.json and return window IDs for our tmux session."""
+        if not config.session_map_file.exists():
+            return set()
+        try:
+            raw = json.loads(config.session_map_file.read_text())
+        except (json.JSONDecodeError, OSError):  # fmt: skip
+            return set()
+        prefix = f"{config.tmux_session_name}:"
+        result: set[str] = set()
+        for key in raw:
+            if key.startswith(prefix):
+                wid = key[len(prefix) :]
+                if self._is_window_id(wid):
+                    result.add(wid)
+        return result
+
+    def audit_state(
+        self,
+        live_window_ids: set[str],
+        live_windows: list[tuple[str, str]],
+    ) -> AuditResult:
+        """Read-only audit of all state maps against live tmux windows.
+
+        Args:
+            live_window_ids: Set of currently alive tmux window IDs.
+            live_windows: List of (window_id, window_name) for live windows.
+
+        Returns:
+            AuditResult with discovered issues.
+        """
+        issues: list[AuditIssue] = []
+
+        # Collect all bound window IDs
+        bound_window_ids: set[str] = set()
+        total_bindings = 0
+        live_binding_count = 0
+        for _uid, bindings in self.thread_bindings.items():
+            for _tid, wid in bindings.items():
+                total_bindings += 1
+                bound_window_ids.add(wid)
+                if wid in live_window_ids:
+                    live_binding_count += 1
+
+        session_map_wids = self._get_session_map_window_ids()
+
+        # 1. Ghost bindings (thread → dead window) — NOT fixable
+        for uid, bindings in self.thread_bindings.items():
+            for tid, wid in bindings.items():
+                if wid not in live_window_ids:
+                    display = self.get_display_name(wid)
+                    issues.append(
+                        AuditIssue(
+                            category="ghost_binding",
+                            detail=f"thread {tid} → {wid} ({display})",
+                            fixable=False,
+                        )
+                    )
+
+        # 2. Orphaned display names
+        in_use = set(self.window_states.keys()) | bound_window_ids
+        for wid in self.window_display_names:
+            if wid not in live_window_ids and wid not in in_use:
+                name = self.window_display_names[wid]
+                issues.append(
+                    AuditIssue(
+                        category="orphaned_display_name",
+                        detail=f"{wid} ({name})",
+                        fixable=True,
+                    )
+                )
+
+        # 3. Orphaned group_chat_ids
+        bound_keys: set[str] = set()
+        for user_id, bindings in self.thread_bindings.items():
+            for thread_id in bindings:
+                bound_keys.add(f"{user_id}:{thread_id}")
+        for key in self.group_chat_ids:
+            if key not in bound_keys:
+                issues.append(
+                    AuditIssue(
+                        category="orphaned_group_chat_id",
+                        detail=f"key {key}",
+                        fixable=True,
+                    )
+                )
+
+        # 4. Stale window_states (not in session_map, not bound, not live)
+        for wid in self.window_states:
+            if (
+                wid not in session_map_wids
+                and wid not in bound_window_ids
+                and wid not in live_window_ids
+            ):
+                display = self.window_states[wid].window_name or wid
+                issues.append(
+                    AuditIssue(
+                        category="stale_window_state",
+                        detail=f"{wid} ({display})",
+                        fixable=True,
+                    )
+                )
+
+        # 5. Stale user_window_offsets
+        known_wids = live_window_ids | bound_window_ids | set(self.window_states.keys())
+        for uid, offsets in self.user_window_offsets.items():
+            for wid in offsets:
+                if wid not in known_wids:
+                    issues.append(
+                        AuditIssue(
+                            category="stale_offset",
+                            detail=f"user {uid}, window {wid}",
+                            fixable=True,
+                        )
+                    )
+
+        # 6. Display name drift (stored != tmux)
+        for wid, tmux_name in live_windows:
+            stored_name = self.window_display_names.get(wid)
+            if stored_name and stored_name != tmux_name:
+                issues.append(
+                    AuditIssue(
+                        category="display_name_drift",
+                        detail=f"{wid}: stored={stored_name!r} tmux={tmux_name!r}",
+                        fixable=True,
+                    )
+                )
+
+        return AuditResult(
+            issues=issues,
+            total_bindings=total_bindings,
+            live_binding_count=live_binding_count,
+        )
+
+    def prune_stale_offsets(self, known_window_ids: set[str]) -> bool:
+        """Remove user_window_offsets entries for unknown windows.
+
+        Returns True if any changes were made.
+        """
+        changed = False
+        empty_users: list[int] = []
+        for uid, offsets in self.user_window_offsets.items():
+            stale = [wid for wid in offsets if wid not in known_window_ids]
+            for wid in stale:
+                logger.info("Pruning stale offset: user %d, window %s", uid, wid)
+                del offsets[wid]
+                changed = True
+            if not offsets:
+                empty_users.append(uid)
+        for uid in empty_users:
+            del self.user_window_offsets[uid]
+            changed = True
+        if changed:
+            self._save_state()
+        return changed
+
+    def prune_stale_window_states(self, live_window_ids: set[str]) -> bool:
+        """Remove window_states not in session_map, not bound, and not live.
+
+        Returns True if any changes were made.
+        """
+        session_map_wids = self._get_session_map_window_ids()
+        bound_window_ids: set[str] = set()
+        for bindings in self.thread_bindings.values():
+            bound_window_ids.update(bindings.values())
+
+        stale = [
+            wid
+            for wid in self.window_states
+            if (
+                wid not in session_map_wids
+                and wid not in bound_window_ids
+                and wid not in live_window_ids
+            )
+        ]
+        if not stale:
+            return False
+        for wid in stale:
+            logger.info("Pruning stale window_state: %s", wid)
+            del self.window_states[wid]
+        self._save_state()
+        return True
+
     async def load_session_map(self) -> None:
         """Read session_map.json and update window_states with new session associations.
 
@@ -479,7 +688,7 @@ class SessionManager:
             async with aiofiles.open(config.session_map_file, "r") as f:
                 content = await f.read()
             session_map = json.loads(content)
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):  # fmt: skip
             return
 
         prefix = f"{config.tmux_session_name}:"

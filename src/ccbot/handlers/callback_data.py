@@ -91,5 +91,9 @@ CB_PANE_SCREENSHOT = "pn:ss:"  # pn:ss:<window_id>:<pane_id>
 # Screenshot control keys
 CB_KEYS_PREFIX = "kb:"  # kb:<key_id>:<window>
 
+# Sync command
+CB_SYNC_FIX = "sync:fix"
+CB_SYNC_DISMISS = "sync:x"
+
 # Idle status sentinel (shared between status_polling and message_queue)
 IDLE_STATUS_TEXT = "\u2713 Ready"

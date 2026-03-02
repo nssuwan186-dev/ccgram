@@ -305,7 +305,7 @@ async def forward_command_handler(
 
     # Resolve sanitized Telegram name back to original CC name
     # e.g. "committing_code" -> "committing-code", "spec_work" -> "spec:work"
-    cc_name = get_cc_name(tg_cmd) or tg_cmd
+    cc_name = (get_cc_name(tg_cmd) or tg_cmd).lstrip("/")
     cc_slash = f"/{cc_name} {args}".rstrip() if args else f"/{cc_name}"
     window_id = session_manager.resolve_window_for_thread(user.id, thread_id)
     if not window_id:

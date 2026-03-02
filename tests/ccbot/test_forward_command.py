@@ -97,6 +97,13 @@ class TestForwardCommandResolution:
 
         self.mock_sm.send_to_window.assert_called_once_with("@1", "/spec:new task auth")
 
+    async def test_leading_slash_mapping_not_double_prefixed(self) -> None:
+        with patch("ccbot.bot.get_cc_name", return_value="/status"):
+            update = _make_update(text="/status")
+            await forward_command_handler(update, _make_context())
+
+        self.mock_sm.send_to_window.assert_called_once_with("@1", "/status")
+
     async def test_unknown_command_forwarded_as_is(self) -> None:
         with patch("ccbot.bot.get_cc_name", return_value=None):
             update = _make_update(text="/unknown_thing")

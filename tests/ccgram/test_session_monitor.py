@@ -159,13 +159,7 @@ class TestPerWindowProviderResolution:
     ) -> None:
         """A stale hookful provider should not suppress Codex transcript parsing."""
         session_file = (
-            tmp_path
-            / ".codex"
-            / "sessions"
-            / "2026"
-            / "03"
-            / "23"
-            / "transcript.jsonl"
+            tmp_path / ".codex" / "sessions" / "2026" / "03" / "23" / "transcript.jsonl"
         )
         session_file.parent.mkdir(parents=True)
         session_file.write_text(
@@ -184,15 +178,19 @@ class TestPerWindowProviderResolution:
         monitor.state.update_session(tracked)
 
         new_messages = []
-        with patch(
-            "ccgram.session_monitor.get_provider_for_window",
-            return_value=ClaudeProvider(),
-        ), patch(
-            "ccgram.session_monitor.registry.is_valid",
-            return_value=True,
-        ), patch(
-            "ccgram.session_monitor.registry.get",
-            return_value=CodexProvider(),
+        with (
+            patch(
+                "ccgram.session_monitor.get_provider_for_window",
+                return_value=ClaudeProvider(),
+            ),
+            patch(
+                "ccgram.session_monitor.registry.is_valid",
+                return_value=True,
+            ),
+            patch(
+                "ccgram.session_monitor.registry.get",
+                return_value=CodexProvider(),
+            ),
         ):
             await monitor._process_session_file(
                 "sess-stale", session_file, new_messages, window_id="@42"

@@ -25,7 +25,11 @@ from telegram.error import TelegramError
 
 from .config import config
 from .monitor_state import MonitorState, TrackedSession
-from .providers import get_provider_for_window
+from .providers import (
+    detect_provider_from_transcript_path,
+    get_provider_for_window,
+    registry,
+)
 from .session import parse_session_map
 from .tmux_manager import tmux_manager
 from .utils import (
@@ -49,6 +53,28 @@ _PathResolveError = (OSError, ValueError)
 _SessionMapError = (json.JSONDecodeError, OSError)
 
 _MSG_PREVIEW_LENGTH = 80
+
+
+def _resolve_provider_for_file(window_id: str, file_path: Path):
+    """Prefer transcript-path provider hints when a hookful state goes stale."""
+    provider = get_provider_for_window(window_id)
+    inferred = detect_provider_from_transcript_path(str(file_path))
+    current = provider.capabilities.name
+    if (
+        inferred
+        and inferred != current
+        and provider.capabilities.supports_hook
+        and registry.is_valid(inferred)
+    ):
+        logger.warning(
+            "Provider mismatch for window %s: state=%s transcript=%s; using %s",
+            window_id,
+            current,
+            file_path,
+            inferred,
+        )
+        return registry.get(inferred)
+    return provider
 
 
 @dataclass
@@ -319,7 +345,7 @@ class SessionMonitor:
 
         Detects file truncation (e.g. after /clear) and resets offset.
         """
-        provider = get_provider_for_window(window_id)
+        provider = _resolve_provider_for_file(window_id, file_path)
 
         # Whole-file providers (Gemini): read entire JSON, track by message count
         if not provider.capabilities.supports_incremental_read:
@@ -428,7 +454,7 @@ class SessionMonitor:
         and parsing. Appends any new messages to the provided list.
         """
         tracked = self.state.get_session(session_id)
-        provider = get_provider_for_window(window_id)
+        provider = _resolve_provider_for_file(window_id, file_path)
 
         if tracked is None:
             # For new sessions, initialize offset to skip old messages.

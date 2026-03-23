@@ -1359,6 +1359,89 @@ class TestMaybeDiscoverTranscript:
             provider_name="gemini",
         )
 
+    async def test_rebinds_stale_claude_window_to_codex_from_transcript_path(
+        self,
+    ) -> None:
+        from ccgram.handlers.status_polling import _maybe_discover_transcript
+        from ccgram.providers.base import SessionStartEvent
+
+        codex_event = SessionStartEvent(
+            session_id="codex-uuid",
+            cwd="/Users/alexei/Workspace/ccgram",
+            transcript_path="/Users/alexei/.codex/sessions/2026/03/23/test.jsonl",
+            window_key="ccgram:@7",
+        )
+        mock_codex = MagicMock()
+        mock_codex.capabilities.supports_hook = False
+        mock_codex.capabilities.name = "codex"
+        mock_codex.discover_transcript.return_value = codex_event
+
+        mock_claude = MagicMock()
+        mock_claude.capabilities.supports_hook = True
+        mock_claude.capabilities.name = "claude"
+
+        mock_state = MagicMock(
+            session_id="old-claude-id",
+            cwd="/Users/alexei/Workspace/ccgram",
+            transcript_path="/Users/alexei/.codex/sessions/old.jsonl",
+            provider_name="claude",
+        )
+
+        def _provider_for_window(_: str) -> MagicMock:
+            if mock_state.provider_name == "codex":
+                return mock_codex
+            return mock_claude
+
+        def _set_window_provider(
+            window_id: str, provider_name: str, *, cwd: str | None = None
+        ) -> None:
+            assert window_id == "@7"
+            mock_state.provider_name = provider_name
+            if cwd:
+                mock_state.cwd = cwd
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.get_provider_for_window",
+                side_effect=_provider_for_window,
+            ),
+            patch(
+                "ccgram.handlers.status_polling.detect_provider_from_command",
+                return_value="",
+            ),
+            patch(
+                "ccgram.handlers.status_polling.should_probe_pane_title_for_provider_detection",
+                return_value=False,
+            ),
+            patch("ccgram.handlers.status_polling.config") as mock_config,
+            patch("ccgram.handlers.status_polling.tmux_manager") as mock_tmux,
+        ):
+            mock_sm.window_states = {"@7": mock_state}
+            mock_sm.set_window_provider.side_effect = _set_window_provider
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(
+                    pane_current_command="node",
+                    cwd="/Users/alexei/Workspace/ccgram",
+                )
+            )
+            mock_config.tmux_session_name = "ccgram"
+            await _maybe_discover_transcript("@7")
+
+        mock_sm.set_window_provider.assert_called_once_with(
+            "@7",
+            "codex",
+            cwd="/Users/alexei/Workspace/ccgram",
+        )
+        mock_codex.discover_transcript.assert_called_once()
+        mock_sm.register_hookless_session.assert_called_once_with(
+            window_id="@7",
+            session_id="codex-uuid",
+            cwd="/Users/alexei/Workspace/ccgram",
+            transcript_path="/Users/alexei/.codex/sessions/2026/03/23/test.jsonl",
+            provider_name="codex",
+        )
+
 
 class TestDeadWindowNotification:
     async def test_marks_notified_even_when_send_fails(self) -> None:

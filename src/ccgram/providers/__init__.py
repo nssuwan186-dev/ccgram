@@ -124,6 +124,20 @@ def detect_provider_from_command(pane_current_command: str) -> str:
     return ""
 
 
+def detect_provider_from_transcript_path(transcript_path: str) -> str:
+    """Infer provider name from a persisted transcript path when possible."""
+    normalized = transcript_path.strip().lower().replace("\\", "/")
+    if not normalized:
+        return ""
+    if "/.codex/sessions/" in normalized:
+        return "codex"
+    if "/.claude/projects/" in normalized:
+        return "claude"
+    if "/.gemini/" in normalized and "/chats/" in normalized:
+        return "gemini"
+    return ""
+
+
 def should_probe_pane_title_for_provider_detection(pane_current_command: str) -> bool:
     """Return True when any provider needs pane-title context to detect runtime."""
     _ensure_registered()
@@ -231,6 +245,7 @@ __all__ = [
     "StatusUpdate",
     "UnknownProviderError",
     "detect_provider_from_command",
+    "detect_provider_from_transcript_path",
     "detect_provider_from_runtime",
     "get_provider",
     "get_provider_for_window",

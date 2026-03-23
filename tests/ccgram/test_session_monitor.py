@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from ccgram.monitor_state import TrackedSession
+from ccgram.providers.claude import ClaudeProvider
+from ccgram.providers.codex import CodexProvider
 from ccgram.session_monitor import NewWindowEvent, SessionMonitor
 
 
@@ -151,6 +153,51 @@ class TestPerWindowProviderResolution:
         )
         assert len(new_messages) == 1
         assert "hello" in new_messages[0].text
+
+    async def test_process_session_file_prefers_transcript_provider_when_stale(
+        self, tmp_path
+    ) -> None:
+        """A stale hookful provider should not suppress Codex transcript parsing."""
+        session_file = (
+            tmp_path / ".codex" / "sessions" / "2026" / "03" / "23" / "transcript.jsonl"
+        )
+        session_file.parent.mkdir(parents=True)
+        session_file.write_text(
+            '{"timestamp":"2026-03-23T00:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello codex"}]}}\n'
+        )
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        tracked = TrackedSession(
+            session_id="sess-stale",
+            file_path=str(session_file),
+            last_byte_offset=0,
+        )
+        monitor.state.update_session(tracked)
+
+        new_messages = []
+        with (
+            patch(
+                "ccgram.session_monitor.get_provider_for_window",
+                return_value=ClaudeProvider(),
+            ),
+            patch(
+                "ccgram.session_monitor.registry.is_valid",
+                return_value=True,
+            ),
+            patch(
+                "ccgram.session_monitor.registry.get",
+                return_value=CodexProvider(),
+            ),
+        ):
+            await monitor._process_session_file(
+                "sess-stale", session_file, new_messages, window_id="@42"
+            )
+
+        assert len(new_messages) == 1
+        assert new_messages[0].text == "hello codex"
 
     async def test_check_for_updates_maps_session_to_window(self, tmp_path) -> None:
         """check_for_updates passes correct window_id to _process_session_file."""

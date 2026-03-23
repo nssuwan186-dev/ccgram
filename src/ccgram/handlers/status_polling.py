@@ -43,6 +43,7 @@ from telegram.error import BadRequest, TelegramError
 from ..config import config
 from ..providers import (
     detect_provider_from_command,
+    detect_provider_from_transcript_path,
     detect_provider_from_runtime,
     get_provider_for_window,
     should_probe_pane_title_for_provider_detection,
@@ -1010,6 +1011,14 @@ async def _maybe_discover_transcript(
             )
         if detected and detected != state.provider_name:
             session_manager.set_window_provider(window_id, detected, cwd=w.cwd or None)
+        elif not detected and state.transcript_path:
+            inferred = detect_provider_from_transcript_path(state.transcript_path)
+            if inferred and inferred != state.provider_name:
+                session_manager.set_window_provider(
+                    window_id,
+                    inferred,
+                    cwd=w.cwd or None,
+                )
 
     # If provider is explicitly set and supports hooks, trust hook delivery
     if state.provider_name:

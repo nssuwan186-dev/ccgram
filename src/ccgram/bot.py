@@ -1821,7 +1821,30 @@ async def post_init(application: Application) -> None:
     logger.info("Status polling task started")
 
 
-async def post_shutdown(_application: Application) -> None:
+async def _send_shutdown_notification(application: Application) -> None:
+    """Send a shutdown notification to the General topic if a group is configured."""
+    from .main import _shutdown_signal
+
+    if not config.group_id:
+        return
+
+    sig = _shutdown_signal
+    reason = f"Received {signal.Signals(sig).name}" if sig else "Clean exit"
+
+    from . import __version__
+
+    text = f"🔌 ccgram stopped — {reason} (v{__version__})"
+    try:
+        await application.bot.send_message(
+            chat_id=config.group_id,
+            text=text,
+            message_thread_id=1,  # General topic
+        )
+    except TelegramError, RuntimeError:
+        logger.debug("Failed to send shutdown notification", exc_info=True)
+
+
+async def post_shutdown(application: Application) -> None:
     global _status_poll_task
 
     # Stop status polling
@@ -1841,6 +1864,9 @@ async def post_shutdown(_application: Application) -> None:
 
     # Flush debounced state to disk AFTER workers/monitor stop (captures final mutations)
     session_manager.flush_state()
+
+    # Notify Telegram group that the bot is shutting down
+    await _send_shutdown_notification(application)
 
 
 async def _error_handler(_update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

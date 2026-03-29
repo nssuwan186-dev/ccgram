@@ -75,25 +75,61 @@ Add agent-to-agent messaging to ccgram, allowing AI coding agents running in dif
 
 ### Architecture
 
-```
-+---------------+  +---------------+
-|  Claude Skill |  |  MCP Server   |   <- Agent-side interfaces (MCP deferred to v2)
-+-------+-------+  +-------+-------+
-        |                   |
-        v                   v
-+-------------------------------+
-|        CLI (ccgram msg)       |      <- Core operations
-+---------------+---------------+
-                |
-                v
-+-------------------------------+
-|   File Mailbox + Registry     |      <- Storage layer (~/.ccgram/mailbox/)
-+---------------+---------------+
-                |
-                v
-+-------------------------------+
-|   ccgram Broker (poll loop)   |      <- Delivery + lifecycle
-+-------------------------------+
+```mermaid
+graph TB
+    subgraph interfaces["Agent-Side Interfaces"]
+        direction LR
+        Skill["Claude Skill\n.claude/skills/ccgram-messaging.md\nInbox check on idle, register, send"]
+        MCP["MCP Server\n(v2 - deferred)\nDesktop Claude, IDE extensions"]
+    end
+
+    subgraph cli["CLI - ccgram msg"]
+        CLI["list-peers, find, send, inbox\nread, reply, broadcast\nregister, spawn, sweep"]
+    end
+
+    subgraph storage["File Mailbox - ~/.ccgram/mailbox/"]
+        direction LR
+        Inboxes["Per-window inboxes\nccgram-at-0/ , ccgram-at-5/\nTimestamp-prefixed JSON files"]
+        Declared["declared.json\nSelf-declared overlay\ntask · team"]
+    end
+
+    subgraph broker["ccgram Broker - polling_coordinator.py"]
+        direction TB
+        Delivery["MessageDeliveryStrategy\nIdle detection, send_keys injection\nMessage merging, Rate limiting"]
+        Sweep["Periodic Sweep\nTTL expiration, Dead window cleanup\nID migration on restart"]
+    end
+
+    subgraph agents["Tmux Windows - Agent Sessions"]
+        direction LR
+        A0["@0 Claude\npayment-service\nfeat/refund"]
+        A5["@5 Claude\napi-gateway\nfeat/auth"]
+        A8["@8 Gemini\ndashboard\nmain"]
+        A12["@12 Shell\ninfra"]
+    end
+
+    subgraph telegram["Telegram Topics"]
+        direction LR
+        T0["Topic: payment-svc\nSilent notifications\nEdit-in-place replies"]
+        T5["Topic: api-gateway"]
+        Spawn["Spawn Approval\n[Approve] [Deny]\nAuto-topic creation"]
+    end
+
+    Skill --> CLI
+    MCP -.-> CLI
+    CLI --> storage
+    broker --> storage
+    broker -->|send_keys on idle| agents
+    broker -.-|skip: shell, broadcast| A12
+    agents -->|ccgram msg reply| storage
+    broker -->|silent notifications| telegram
+    Spawn --> agents
+
+    style interfaces fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#333
+    style cli fill:#e8f4fd,stroke:#0088cc,stroke-width:2px,color:#333
+    style storage fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#333
+    style broker fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#333
+    style agents fill:#f0faf0,stroke:#2ea44f,stroke-width:2px,color:#333
+    style telegram fill:#e8eaf6,stroke:#283593,stroke-width:2px,color:#333
 ```
 
 ### Message types
@@ -104,6 +140,32 @@ Add agent-to-agent messaging to ccgram, allowing AI coding agents running in dif
 | `reply`     | Response to a request. Links via `reply_to`          | No                       | 120 min     |
 | `notify`    | Fire-and-forget                                      | No                       | 240 min     |
 | `broadcast` | Notify to every matching recipient's inbox           | No                       | 480 min     |
+
+### Message lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: Message created
+    pending --> delivered: Broker injects via send_keys
+    pending --> expired: TTL exceeded
+    delivered --> read: Agent runs ccgram msg read
+    read --> replied: Agent runs ccgram msg reply
+    delivered --> expired: TTL exceeded (unread)
+    replied --> swept: Periodic sweep
+    expired --> swept: Periodic sweep
+    read --> swept: Periodic sweep (old)
+    swept --> [*]
+
+    note right of pending
+        Crash recovery: re-inject
+        if no delivered_at after 5s
+    end note
+
+    note right of delivered
+        delivered_at = injected timestamp
+        No ACK protocol
+    end note
+```
 
 ### Message format
 
@@ -456,37 +518,74 @@ Ensure agents can identify their own window ID for CLI operations.
 
 ### Delivery flow
 
+```mermaid
+sequenceDiagram
+    participant A as Agent A<br/>(@0 payment-svc)
+    participant M as Mailbox<br/>(~/.ccgram/mailbox/)
+    participant B as Broker<br/>(poll loop)
+    participant W as Agent B<br/>(@5 api-gateway)
+    participant T as Telegram<br/>(both topics)
+
+    A->>M: ccgram msg send @5 "API contract?"
+    Note over A: Returns immediately (async)
+    M-->>T: → @5 [request] API contract query
+    Note over T: Silent notification
+
+    loop Every poll cycle (1s)
+        B->>M: Scan inboxes for pending
+        Note over B: @5 is busy → skip
+    end
+
+    Note over W: Agent finishes task<br/>→ idle (Stop hook)
+    B->>M: @5 idle — check pending
+
+    alt Shell provider
+        B-->>T: Show pending msg in topic<br/>[Forward] [Dismiss]
+    else Broadcast type
+        Note over B: Inbox-only<br/>No send_keys
+    else Normal delivery
+        B->>B: Merge pending msgs<br/>Single-line, 500 char cap
+        B->>W: send_keys (merged block)
+        B->>M: Set delivered_at
+        M-->>T: ← @0 [request] Delivered
+    end
+
+    Note over W: Skill prompt:<br/>"1 peer request. Handle it?"
+    Note over W: User approves
+
+    W->>M: ccgram msg reply <id> "answer"
+    M-->>T: Edit original: ✓ Reply received
+
+    A->>M: ccgram msg inbox
+    M->>A: Reply content
 ```
-Agent A (skill)                    ccgram broker              Agent B (skill)
-─────────────────                  ─────────────              ─────────────────
-ccgram msg send @5 "API?"
-  → writes ccgram:@5/inbox/<ts>-<id>.json
-  → returns immediately (async)
-                                   poll cycle: scan all inboxes for pending
-                                   ccgram:@5 has pending msg, @5 is busy → skip
-                                   ...
-                                   @5 goes idle (Stop hook)
-                                   ┌─ shell provider? ──────┐
-                                   │  YES: skip send_keys   │
-                                   │  show in Telegram topic │
-                                   ├─ broadcast type? ──────┤
-                                   │  YES: skip send_keys   │
-                                   │  inbox-only delivery    │
-                                   ├─ multiple pending? ────┤
-                                   │  YES: merge into one   │
-                                   │  injection block       │
-                                   └────────────────────────┘
-                                   format: single-line, 500 char cap
-                                   file ref for long bodies
-                                   send_keys (one merged block)
-                                   sets delivered_at on all       Agent B sees merged message
-                                                                  Agent B summarizes to user:
-                                                                    "I have 1 peer request. Handle it?"
-                                                                  User approves → agent processes
-                                                                  ccgram msg reply <id> "answer"
-                                                                    → writes ccgram:@0/inbox/reply.json
-Agent A checks inbox (skill or --wait poll)
-  reads reply
+
+### Spawn approval flow
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A (@0)
+    participant C as ccgram Broker
+    participant T as Telegram Topic
+    participant U as User
+    participant W as New Agent (@7)
+
+    A->>C: ccgram msg spawn --provider claude<br/>--cwd ~/api-gw --prompt "review auth"
+    C->>C: Validate provider, cwd,<br/>max-windows, rate limit
+
+    alt --auto mode
+        C->>C: Skip approval
+    else Default
+        C->>T: Spawn request<br/>[Approve] [Deny]
+        U->>T: [Approve]
+    end
+
+    C->>T: createForumTopic("api-gw")
+    C->>W: Create tmux window
+    C->>W: Launch agent + send prompt
+    C->>W: Install messaging skill
+    C-->>T: "Spawned by @0 for: review auth"
+    C->>A: Return window_id @7
 ```
 
 ### send_keys injection format
@@ -554,6 +653,56 @@ When sender blocks with `--wait`:
 | **Graceful shutdown**    | `bot.post_shutdown()`                  | Flush any pending mailbox state (after monitor.stop(), before state flush) |
 
 **Foreign window respect:** Emdash windows (identified by ":" in session name) are never swept or pruned — they're owned by external tools.
+
+### Recovery and lifecycle integration
+
+```mermaid
+graph TB
+    subgraph startup["Bot Startup (post_init)"]
+        direction TB
+        S1["resolve_stale_ids()"]
+        S2["Mailbox: migrate_ids(remap)"]
+        S3["prune_stale_state(live_ids)"]
+        S4["Mailbox: prune_dead(live_ids)"]
+        S5["Start poll loop"]
+        S1 --> S2 --> S3 --> S4 --> S5
+    end
+
+    subgraph runtime["Normal Operation"]
+        direction TB
+        R1["Poll loop (1s)"]
+        R2["Broker delivery cycle"]
+        R3["Mailbox sweep (5 min)"]
+        R1 --> R2
+        R1 --> R3
+    end
+
+    subgraph events["Event-Driven"]
+        direction TB
+        E1["Stop hook → @5 idle"]
+        E2["Immediate broker check for @5"]
+        E3["Topic closed"]
+        E4["clear_topic_state()\n→ clear declared overlay\n→ sweep window inbox"]
+        E1 --> E2
+        E3 --> E4
+    end
+
+    subgraph shutdown["Bot Shutdown (post_shutdown)"]
+        direction TB
+        D1["Cancel poll loop"]
+        D2["Flush mailbox state"]
+        D3["Flush session state"]
+        D1 --> D2 --> D3
+    end
+
+    startup --> runtime
+    runtime --> shutdown
+
+    style startup fill:#e8f4fd,stroke:#0088cc,stroke-width:2px,color:#333
+    style runtime fill:#f0faf0,stroke:#2ea44f,stroke-width:2px,color:#333
+    style events fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#333
+    style shutdown fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#333
+```
 
 ## Post-Completion
 

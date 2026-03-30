@@ -80,7 +80,7 @@ class Message:
 
     def is_expired(self) -> bool:
         if not self.created_at:
-            return False
+            return True
         created = datetime.fromisoformat(self.created_at)
         elapsed = datetime.now(timezone.utc) - created
         return elapsed.total_seconds() > self.ttl_minutes * 60
@@ -322,7 +322,7 @@ class Mailbox:
                     context=context,
                 )
                 sent.append(msg)
-            except ValueError:
+            except ValueError, OSError:
                 logger.warning("Broadcast send failed", from_id=from_id, to_id=to_id)
         return sent
 
@@ -542,4 +542,5 @@ class Mailbox:
                 continue
             with contextlib.suppress(OSError):
                 os.unlink(entry.path)
-        inbox_dir.rmdir()
+        with contextlib.suppress(OSError):
+            inbox_dir.rmdir()

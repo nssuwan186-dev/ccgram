@@ -353,6 +353,7 @@ async def broker_delivery_cycle(
                 count=len(to_deliver),
             )
             await _notify_delivered(bot, qualified_id, to_deliver)
+            await _notify_senders(bot, qualified_id, to_deliver)
 
     # Process pending spawn requests
     if bot is not None:
@@ -373,6 +374,21 @@ async def _notify_delivered(
         await notify_messages_delivered(bot, to_window, messages)
     except OSError, TelegramError:
         logger.debug("Failed to send delivery notification", window=to_window)
+
+
+async def _notify_senders(
+    bot: "Bot | None", to_window: str, messages: list["Message"]
+) -> None:
+    """Notify each sender's Telegram topic that their message was delivered."""
+    if bot is None:
+        return
+    from .msg_telegram import notify_message_sent
+
+    for msg in messages:
+        try:
+            await notify_message_sent(bot, msg.from_id, to_window, msg)
+        except OSError, TelegramError:
+            logger.debug("Failed to send sender notification", from_id=msg.from_id)
 
 
 async def _notify_loop(bot: "Bot | None", window_a: str, window_b: str) -> None:
@@ -427,9 +443,14 @@ async def _process_spawn_requests(bot: "Bot") -> None:
     for req in new_requests:
         try:
             if req.auto or config.msg_auto_spawn:
-                await handle_spawn_approval(
+                result = await handle_spawn_approval(
                     req.id, bot, spawn_timeout=config.msg_spawn_timeout
                 )
+                if result is None:
+                    from ..spawn_request import _spawns_dir
+
+                    spawn_file = _spawns_dir() / f"{req.id}.json"
+                    spawn_file.unlink(missing_ok=True)
             else:
                 posted = await post_spawn_approval_keyboard(
                     bot, req.requester_window, req

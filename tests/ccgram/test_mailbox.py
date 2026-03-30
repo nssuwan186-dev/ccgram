@@ -89,9 +89,9 @@ class TestMessage:
         )
         assert msg.is_expired()
 
-    def test_is_expired_false_without_created_at(self):
+    def test_is_expired_true_without_created_at(self):
         msg = Message(id="1", from_id="a", to_id="b", type="request", body="hi")
-        assert not msg.is_expired()
+        assert msg.is_expired()
 
     def test_from_dict_legacy_from_to_keys(self):
         data = {

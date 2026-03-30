@@ -154,6 +154,8 @@ class Config:
                 f"CCGRAM_LLM_TEMPERATURE must be a valid number: {e}"
             ) from e
 
+        self._init_messaging()
+
         # Auto-close stale topics (minutes; 0 = disabled)
         self.autoclose_done_minutes = int(os.getenv("AUTOCLOSE_DONE_MINUTES", "30"))
         self.autoclose_dead_minutes = int(os.getenv("AUTOCLOSE_DEAD_MINUTES", "10"))
@@ -166,6 +168,18 @@ class Config:
             len(self.allowed_users),
             self.tmux_session_name,
         )
+
+    def _init_messaging(self) -> None:
+        self.msg_auto_spawn: bool = os.getenv("CCGRAM_MSG_AUTO_SPAWN", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self.msg_max_windows: int = int(os.getenv("CCGRAM_MSG_MAX_WINDOWS", "10"))
+        self.msg_wait_timeout: int = int(os.getenv("CCGRAM_MSG_WAIT_TIMEOUT", "60"))
+        self.msg_spawn_timeout: int = int(os.getenv("CCGRAM_MSG_SPAWN_TIMEOUT", "300"))
+        self.msg_spawn_rate: int = int(os.getenv("CCGRAM_MSG_SPAWN_RATE", "3"))
+        self.msg_rate_limit: int = int(os.getenv("CCGRAM_MSG_RATE_LIMIT", "10"))
 
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if a user is in the allowed list."""

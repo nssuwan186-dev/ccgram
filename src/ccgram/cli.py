@@ -70,6 +70,9 @@ _FLAG_TO_ENV: list[tuple[str, str]] = [
     ("claude_config_dir", "CLAUDE_CONFIG_DIR"),
     ("whisper_provider", "CCGRAM_WHISPER_PROVIDER"),
     ("ack_reaction", "CCGRAM_ACK_REACTION"),
+    ("msg_auto_spawn", "CCGRAM_MSG_AUTO_SPAWN"),
+    ("msg_max_windows", "CCGRAM_MSG_MAX_WINDOWS"),
+    ("msg_rate_limit", "CCGRAM_MSG_RATE_LIMIT"),
 ]
 
 

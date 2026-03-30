@@ -119,3 +119,65 @@ class TestShowHiddenDirs:
         monkeypatch.setenv("CCGRAM_SHOW_HIDDEN_DIRS", value)
         cfg = Config()
         assert cfg.show_hidden_dirs is True
+
+
+@pytest.mark.usefixtures("_base_env")
+class TestMessagingConfig:
+    def test_msg_auto_spawn_default_false(self):
+        cfg = Config()
+        assert cfg.msg_auto_spawn is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "True"])
+    def test_msg_auto_spawn_enabled(self, monkeypatch, value):
+        monkeypatch.setenv("CCGRAM_MSG_AUTO_SPAWN", value)
+        cfg = Config()
+        assert cfg.msg_auto_spawn is True
+
+    def test_msg_max_windows_default(self):
+        cfg = Config()
+        assert cfg.msg_max_windows == 10
+
+    def test_msg_max_windows_override(self, monkeypatch):
+        monkeypatch.setenv("CCGRAM_MSG_MAX_WINDOWS", "20")
+        cfg = Config()
+        assert cfg.msg_max_windows == 20
+
+    def test_msg_wait_timeout_default(self):
+        cfg = Config()
+        assert cfg.msg_wait_timeout == 60
+
+    def test_msg_wait_timeout_override(self, monkeypatch):
+        monkeypatch.setenv("CCGRAM_MSG_WAIT_TIMEOUT", "120")
+        cfg = Config()
+        assert cfg.msg_wait_timeout == 120
+
+    def test_msg_spawn_timeout_default(self):
+        cfg = Config()
+        assert cfg.msg_spawn_timeout == 300
+
+    def test_msg_spawn_timeout_override(self, monkeypatch):
+        monkeypatch.setenv("CCGRAM_MSG_SPAWN_TIMEOUT", "600")
+        cfg = Config()
+        assert cfg.msg_spawn_timeout == 600
+
+    def test_msg_spawn_rate_default(self):
+        cfg = Config()
+        assert cfg.msg_spawn_rate == 3
+
+    def test_msg_spawn_rate_override(self, monkeypatch):
+        monkeypatch.setenv("CCGRAM_MSG_SPAWN_RATE", "5")
+        cfg = Config()
+        assert cfg.msg_spawn_rate == 5
+
+    def test_msg_rate_limit_default(self):
+        cfg = Config()
+        assert cfg.msg_rate_limit == 10
+
+    def test_msg_rate_limit_override(self, monkeypatch):
+        monkeypatch.setenv("CCGRAM_MSG_RATE_LIMIT", "25")
+        cfg = Config()
+        assert cfg.msg_rate_limit == 25
+
+    def test_mailbox_dir_derived_from_config_dir(self, tmp_path):
+        cfg = Config()
+        assert cfg.mailbox_dir == tmp_path / "mailbox"

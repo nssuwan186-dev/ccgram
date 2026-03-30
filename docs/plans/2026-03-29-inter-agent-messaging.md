@@ -324,8 +324,8 @@ Click group with subcommands for all operations. Following existing pattern (cli
 
 Add new env vars to Config for all messaging settings.
 
-- [ ] write tests for new config values: defaults, env var override, config-dir mailbox path
-- [ ] extend `src/ccgram/config.py`:
+- [x] write tests for new config values: defaults, env var override, config-dir mailbox path
+- [x] extend `src/ccgram/config.py`:
   - `msg_auto_spawn: bool` from `CCGRAM_MSG_AUTO_SPAWN` (default: False)
   - `msg_max_windows: int` from `CCGRAM_MSG_MAX_WINDOWS` (default: 10)
   - `msg_wait_timeout: int` from `CCGRAM_MSG_WAIT_TIMEOUT` (default: 60)
@@ -333,8 +333,8 @@ Add new env vars to Config for all messaging settings.
   - `msg_spawn_rate: int` from `CCGRAM_MSG_SPAWN_RATE` (default: 3)
   - `msg_rate_limit: int` from `CCGRAM_MSG_RATE_LIMIT` (default: 10)
   - `mailbox_dir: Path` derived from config_dir / `mailbox`
-- [ ] add CLI flag mappings to `_FLAG_TO_ENV` in `cli.py` (for flags that make sense on `run` command)
-- [ ] run `make fmt && make test && make lint` — must pass
+- [x] add CLI flag mappings to `_FLAG_TO_ENV` in `cli.py` (for flags that make sense on `run` command)
+- [x] run `make fmt && make test && make lint` — must pass
 
 ### Task 5: Broker delivery — idle detection + send_keys injection
 

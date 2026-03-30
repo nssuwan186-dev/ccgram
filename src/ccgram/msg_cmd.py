@@ -351,28 +351,20 @@ def broadcast_cmd(
         filter_cwd=cwd,
     )
 
-    recipients = [p for p in peers if p.window_id != my_id]
-    if not recipients:
+    recipient_ids = [p.window_id for p in peers if p.window_id != my_id]
+    if not recipient_ids:
         click.echo("No matching recipients.")
         return
 
-    ttl_minutes = ttl if ttl is not None else 480
-    sent = 0
-    for peer in recipients:
-        try:
-            mailbox.send(
-                from_id=my_id,
-                to_id=peer.window_id,
-                body=body,
-                msg_type="broadcast",
-                subject=subject,
-                ttl_minutes=ttl_minutes,
-            )
-            sent += 1
-        except ValueError as exc:
-            click.echo(f"Warning: failed to send to {peer.window_id}: {exc}", err=True)
+    sent = mailbox.broadcast(
+        from_id=my_id,
+        recipient_ids=recipient_ids,
+        body=body,
+        subject=subject,
+        ttl_minutes=ttl if ttl is not None else None,
+    )
 
-    click.echo(f"Broadcast to {sent} recipient(s).")
+    click.echo(f"Broadcast to {len(sent)} recipient(s).")
 
 
 @msg_group.command("register")

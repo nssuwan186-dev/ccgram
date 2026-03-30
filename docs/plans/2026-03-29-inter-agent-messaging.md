@@ -400,17 +400,17 @@ Inter-agent messages shown in Telegram topics, silent by default, grouped. **Rou
 
 Filtered broadcast: send a notify to all matching peers.
 
-- [ ] write tests for broadcast to all peers
-- [ ] write tests for filtered broadcast: by team, provider, cwd pattern
-- [ ] write tests for broadcast TTL (480 min default)
-- [ ] write tests for broadcast Telegram visibility: single summary message, not per-recipient
-- [ ] implement broadcast in `Mailbox.broadcast()`:
+- [x] write tests for broadcast to all peers
+- [x] write tests for filtered broadcast: by team, provider, cwd pattern
+- [x] write tests for broadcast TTL (480 min default)
+- [x] write tests for broadcast Telegram visibility: single summary message, not per-recipient
+- [x] implement broadcast in `Mailbox.broadcast()`:
   - Write one message file per matching recipient inbox
   - Filter by team, provider, cwd glob pattern (using `fnmatch`)
   - Type is `notify` with 480 min TTL
   - Telegram: single summary notification in sender's topic listing recipients
-- [ ] wire into CLI `broadcast` subcommand (already stubbed in Task 3)
-- [ ] run `make fmt && make test && make lint` — must pass
+- [x] wire into CLI `broadcast` subcommand (already stubbed in Task 3)
+- [x] run `make fmt && make test && make lint` — must pass
 
 ### Task 8: Agent spawning with Telegram approval
 

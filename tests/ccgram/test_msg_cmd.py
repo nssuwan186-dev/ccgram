@@ -405,6 +405,40 @@ class TestBroadcast:
         assert len(mailbox.inbox("ccgram:@5")) == 1
 
     @patch("ccgram.msg_discovery._detect_branch", return_value="main")
+    def test_broadcast_filtered_by_cwd(
+        self, _mock_branch, runner: CliRunner, mailbox: Mailbox, state_dir: Path
+    ):
+        _write_state(
+            state_dir,
+            {
+                "@0": {"cwd": "/a", "window_name": "a", "provider_name": "claude"},
+                "@5": {
+                    "cwd": "/projects/backend",
+                    "window_name": "b",
+                    "provider_name": "claude",
+                },
+                "@8": {
+                    "cwd": "/projects/frontend",
+                    "window_name": "c",
+                    "provider_name": "claude",
+                },
+                "@9": {
+                    "cwd": "/other/thing",
+                    "window_name": "d",
+                    "provider_name": "claude",
+                },
+            },
+        )
+        result = runner.invoke(
+            cli, ["msg", "broadcast", "projects only", "--cwd", "/projects/*"]
+        )
+        assert result.exit_code == 0
+        assert "2 recipient" in result.output
+        assert len(mailbox.inbox("ccgram:@5")) == 1
+        assert len(mailbox.inbox("ccgram:@8")) == 1
+        assert len(mailbox.inbox("ccgram:@9")) == 0
+
+    @patch("ccgram.msg_discovery._detect_branch", return_value="main")
     def test_broadcast_no_recipients(
         self, _mock_branch, runner: CliRunner, state_dir: Path
     ):

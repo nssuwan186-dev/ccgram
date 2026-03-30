@@ -284,6 +284,41 @@ class Mailbox:
             reply_to=msg_id,
         )
 
+    def broadcast(
+        self,
+        from_id: str,
+        recipient_ids: list[str],
+        body: str,
+        *,
+        subject: str = "",
+        ttl_minutes: int | None = None,
+        file_path: str | None = None,
+        context: dict[str, str] | None = None,
+    ) -> list[Message]:
+        """Send a broadcast message to multiple recipients.
+
+        Writes one message file per recipient inbox. Type is always
+        ``broadcast`` with 480 min TTL by default. Returns list of
+        successfully sent messages.
+        """
+        sent: list[Message] = []
+        for to_id in recipient_ids:
+            try:
+                msg = self.send(
+                    from_id=from_id,
+                    to_id=to_id,
+                    body=body,
+                    msg_type="broadcast",
+                    subject=subject,
+                    ttl_minutes=ttl_minutes,
+                    file_path=file_path,
+                    context=context,
+                )
+                sent.append(msg)
+            except ValueError:
+                logger.warning("Broadcast send failed", from_id=from_id, to_id=to_id)
+        return sent
+
     def mark_delivered(self, msg_id: str, window_id: str) -> Message | None:
         """Set delivered_at timestamp on a message."""
         msg, path = self._find_message(msg_id, window_id)

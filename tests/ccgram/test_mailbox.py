@@ -414,6 +414,70 @@ class TestMigrateIds:
         assert mailbox._inbox_dir("ccgram:@7").is_dir()
 
 
+class TestBroadcast:
+    def test_broadcast_to_multiple_recipients(self, mailbox: Mailbox):
+        sent = mailbox.broadcast("ccgram:@0", ["ccgram:@5", "ccgram:@8"], "hello all")
+        assert len(sent) == 2
+        assert len(mailbox.inbox("ccgram:@5")) == 1
+        assert len(mailbox.inbox("ccgram:@8")) == 1
+        assert len(mailbox.inbox("ccgram:@0")) == 0
+
+    def test_broadcast_type_is_broadcast(self, mailbox: Mailbox):
+        sent = mailbox.broadcast("ccgram:@0", ["ccgram:@5"], "typed")
+        assert sent[0].type == "broadcast"
+
+    def test_broadcast_default_ttl_480(self, mailbox: Mailbox):
+        sent = mailbox.broadcast("ccgram:@0", ["ccgram:@5"], "ttl check")
+        assert sent[0].ttl_minutes == 480
+
+    def test_broadcast_custom_ttl(self, mailbox: Mailbox):
+        sent = mailbox.broadcast("ccgram:@0", ["ccgram:@5"], "custom", ttl_minutes=120)
+        assert sent[0].ttl_minutes == 120
+
+    def test_broadcast_with_subject(self, mailbox: Mailbox):
+        sent = mailbox.broadcast(
+            "ccgram:@0", ["ccgram:@5"], "body", subject="Important"
+        )
+        assert sent[0].subject == "Important"
+
+    def test_broadcast_empty_recipients(self, mailbox: Mailbox):
+        sent = mailbox.broadcast("ccgram:@0", [], "nobody")
+        assert sent == []
+
+    def test_broadcast_with_file(self, mailbox: Mailbox, tmp_path: Path):
+        payload = tmp_path / "broadcast.txt"
+        payload.write_text("large broadcast content")
+        sent = mailbox.broadcast(
+            "ccgram:@0", ["ccgram:@5", "ccgram:@8"], "", file_path=str(payload)
+        )
+        assert len(sent) == 2
+        assert all(m.body.startswith("[file:") for m in sent)
+
+    def test_broadcast_with_context(self, mailbox: Mailbox):
+        ctx = {"cwd": "/project", "branch": "main", "provider": "claude"}
+        sent = mailbox.broadcast("ccgram:@0", ["ccgram:@5"], "ctx", context=ctx)
+        assert sent[0].context == ctx
+
+    def test_broadcast_continues_on_individual_failure(self, mailbox: Mailbox):
+        with patch.object(
+            mailbox,
+            "send",
+            side_effect=[
+                ValueError("fail"),
+                Message(
+                    id="ok",
+                    from_id="ccgram:@0",
+                    to_id="ccgram:@8",
+                    type="broadcast",
+                    body="ok",
+                ),
+            ],
+        ):
+            sent = mailbox.broadcast("ccgram:@0", ["ccgram:@5", "ccgram:@8"], "partial")
+        assert len(sent) == 1
+        assert sent[0].to_id == "ccgram:@8"
+
+
 class TestSweep:
     def test_removes_expired_messages(self, mailbox: Mailbox):
         mailbox.send("a", "ccgram:@0", "expires", ttl_minutes=0)

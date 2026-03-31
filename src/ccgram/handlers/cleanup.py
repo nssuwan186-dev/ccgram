@@ -138,3 +138,26 @@ async def clear_topic_state(
         stale = [k for k in voice_store if k[0] == chat_id]
         for k in stale:
             voice_store.pop(k, None)
+
+    # Dual-path: also dispatch via registry (additive — migrating modules
+    # will self-register here; explicit calls above remain until migration)
+    from .topic_state_registry import topic_state
+
+    qualified_id: str | None = None
+    if window_id:
+        from ..config import config
+        from ..window_resolver import is_foreign_window
+
+        qualified_id = (
+            window_id
+            if is_foreign_window(window_id)
+            else f"{config.tmux_session_name}:{window_id}"
+        )
+
+    topic_state.clear_all(
+        user_id,
+        thread_id,
+        window_id=window_id,
+        qualified_id=qualified_id,
+        chat_id=chat_id,
+    )

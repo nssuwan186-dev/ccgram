@@ -318,7 +318,7 @@ Design doc: `docs/design/topic-state-registry/design.md`
 
 Create the registry module. Keep existing explicit cleanup calls in `cleanup.py` AND add registry dispatch — dual-path ensures nothing breaks during migration.
 
-- [ ] create `handlers/topic_state_registry.py`:
+- [x] create `handlers/topic_state_registry.py`:
 
   ```python
   class TopicStateRegistry:
@@ -335,10 +335,10 @@ Create the registry module. Keep existing explicit cleanup calls in `cleanup.py`
       def clear_all(self, user_id, thread_id, window_id=None, qualified_id=None, chat_id=None) -> None: ...
   ```
 
-- [ ] create module singleton: `topic_state = TopicStateRegistry()`
-- [ ] `cleanup.py`: import `topic_state`; call `topic_state.clear_all(...)` at the END of `clear_topic_state()` (after existing explicit calls — dual-path)
-- [ ] write tests: `test_register_and_clear_topic`, `test_register_and_clear_window`, `test_dedup_prevents_double_call`, `test_failing_cleanup_doesnt_block_others`, `test_clear_all_dispatches_all_scopes`
-- [ ] `make check` — must pass
+- [x] create module singleton: `topic_state = TopicStateRegistry()`
+- [x] `cleanup.py`: import `topic_state`; call `topic_state.clear_all(...)` at the END of `clear_topic_state()` (after existing explicit calls — dual-path)
+- [x] write tests: `test_register_and_clear_topic`, `test_register_and_clear_window`, `test_dedup_prevents_double_call`, `test_failing_cleanup_doesnt_block_others`, `test_clear_all_dispatches_all_scopes`
+- [x] `make check` — must pass
 
 #### Task 9b: Migrate handlers to self-register (batch 1 — topic-scoped)
 

@@ -1,45 +1,35 @@
 """Polling coordinator for terminal status monitoring.
 
-Orchestrates the polling cycle by iterating thread bindings and delegating
-to strategy classes in polling_strategies.py. Contains all async orchestration
-functions (update_status_message, interactive UI checks, transcript discovery,
-shell relay, dead window handling) plus the main polling loop.
+Orchestrates the per-topic polling cycle: iterates thread bindings, delegates
+to strategy classes for state, and handles terminal status parsing, interactive
+UI detection, shell relay, and dead window notification.
+
+Periodic tasks (broker delivery, autoclose, topic probing) are in
+periodic_tasks.py. Transcript discovery is in transcript_discovery.py.
 
 Key components:
   - status_poll_loop: Background polling task (entry point for bot.py)
   - update_status_message: Poll and enqueue status updates
-  - STATUS_POLL_INTERVAL / TOPIC_CHECK_INTERVAL: Timing constants
 """
 
 import asyncio
 import contextlib
-import structlog
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
 from telegram import Bot
-
-if TYPE_CHECKING:
-    from ..tmux_manager import TmuxWindow
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, TelegramError
 
-from ..config import config
-from ..providers import (
-    detect_provider_from_pane,
-    detect_provider_from_runtime,
-    detect_provider_from_transcript_path,
-    get_provider_for_window,
-    should_probe_pane_title_for_provider_detection,
-)
+from ..providers import get_provider_for_window
 from ..providers.base import StatusUpdate
 from ..session import session_manager
 from ..session_monitor import get_active_monitor
 from ..thread_router import thread_router
 from ..tmux_manager import tmux_manager
-from ..utils import log_throttle_sweep, log_throttled
-from ..window_resolver import is_foreign_window
+from ..utils import log_throttled
 from .cleanup import clear_topic_state
 from .interactive_ui import (
     clear_interactive_mode,
@@ -54,30 +44,26 @@ from .message_queue import (
     get_message_queue,
 )
 from .message_sender import rate_limit_send_message
+from .periodic_tasks import run_lifecycle_tasks, run_periodic_tasks
 from .polling_strategies import (
-    ACTIVITY_THRESHOLD,
-    MAX_PROBE_FAILURES,
     PANE_COUNT_TTL,
-    STARTUP_TIMEOUT,
-    TYPING_INTERVAL,
-    TopicPollState,
-    WindowPollState,
-    clear_window_poll_state,
     interactive_strategy,
     is_shell_prompt,
     lifecycle_strategy,
     terminal_strategy,
 )
-from .msg_broker import BROKER_CYCLE_INTERVAL, SWEEP_INTERVAL
 from .recovery_callbacks import build_recovery_keyboard
 from .topic_emoji import update_topic_emoji
+from .transcript_discovery import discover_and_register_transcript
+
+if TYPE_CHECKING:
+    from ..tmux_manager import TmuxWindow
 
 logger = structlog.get_logger()
 
 # ── Timing constants ──────────────────────────────────────────────────────
 
 STATUS_POLL_INTERVAL = 1.0  # seconds
-TOPIC_CHECK_INTERVAL = 60.0  # seconds
 
 
 # Exponential backoff bounds for loop errors (seconds)
@@ -88,19 +74,6 @@ _BACKOFF_MAX = 30.0
 _LoopError = (TelegramError, OSError, RuntimeError, ValueError)
 
 
-# ── State access helpers ─────────────────────────────────────────────────
-
-
-def _get_window_state(window_id: str) -> WindowPollState:
-    """Get or create WindowPollState for a window."""
-    return terminal_strategy.get_state(window_id)
-
-
-def _get_topic_state(user_id: int, thread_id: int) -> TopicPollState:
-    """Get or create TopicPollState for a topic."""
-    return lifecycle_strategy.get_state(user_id, thread_id)
-
-
 # ── Typing throttle ─────────────────────────────────────────────────────
 
 
@@ -108,11 +81,10 @@ async def _send_typing_throttled(bot: Bot, user_id: int, thread_id: int | None) 
     """Send typing indicator if enough time has elapsed since the last one."""
     if thread_id is None:
         return
-    ts = _get_topic_state(user_id, thread_id)
-    now = time.monotonic()
-    if now - (ts.last_typing_sent or 0.0) < TYPING_INTERVAL:
+    if lifecycle_strategy.is_typing_throttled(user_id, thread_id):
         return
-    ts.last_typing_sent = now
+    ts = lifecycle_strategy.get_state(user_id, thread_id)
+    ts.last_typing_sent = time.monotonic()
     chat_id = thread_router.resolve_chat_id(user_id, thread_id)
     with contextlib.suppress(TelegramError):
         await bot.send_chat_action(
@@ -138,7 +110,7 @@ def _parse_with_pyte(
 # ── Transcript activity check ───────────────────────────────────────────
 
 
-def _check_transcript_activity(window_id: str, now: float) -> bool:
+def _check_transcript_activity(window_id: str) -> bool:
     """Check if recent transcript writes indicate an active agent."""
     session_id = session_manager.get_session_id_for_window(window_id)
     if not session_id:
@@ -148,10 +120,7 @@ def _check_transcript_activity(window_id: str, now: float) -> bool:
     if not mon:
         return False
     last_activity = mon.get_last_activity(session_id)
-    if last_activity and (now - last_activity) < ACTIVITY_THRESHOLD:
-        terminal_strategy.mark_seen_status(window_id)
-        return True
-    return False
+    return terminal_strategy.is_recently_active(window_id, last_activity)
 
 
 # ── Idle / no-status transitions ────────────────────────────────────────
@@ -167,10 +136,10 @@ async def _transition_to_idle(
     notif_mode: str,
 ) -> None:
     """Transition a window to idle state (emoji, autoclose, typing, status)."""
-    _get_window_state(window_id).startup_time = None
+    terminal_strategy.get_state(window_id).startup_time = None
     await update_topic_emoji(bot, chat_id, thread_id, "idle", display)
     lifecycle_strategy.clear_autoclose_timer(user_id, thread_id)
-    _get_topic_state(user_id, thread_id).last_typing_sent = None
+    lifecycle_strategy.get_state(user_id, thread_id).last_typing_sent = None
     if notif_mode not in ("muted", "errors_only"):
         from .callback_data import IDLE_STATUS_TEXT
 
@@ -191,7 +160,7 @@ async def _handle_no_status(
 ) -> None:
     """Handle a window with no provider-detected terminal status."""
     now = time.monotonic()
-    is_active = _check_transcript_activity(window_id, now)
+    is_active = _check_transcript_activity(window_id)
 
     if is_active:
         await _send_typing_throttled(bot, user_id, thread_id)
@@ -207,7 +176,7 @@ async def _handle_no_status(
 
     chat_id = thread_router.resolve_chat_id(user_id, thread_id)
     display = thread_router.get_display_name(window_id)
-    ws = _get_window_state(window_id)
+    ws = terminal_strategy.get_state(window_id)
 
     if is_shell_prompt(pane_current_command):
         ws.startup_time = None
@@ -223,7 +192,7 @@ async def _handle_no_status(
 
         await update_topic_emoji(bot, chat_id, thread_id, "done", display)
         lifecycle_strategy.start_autoclose_timer(user_id, thread_id, "done", now)
-        _get_topic_state(user_id, thread_id).last_typing_sent = None
+        lifecycle_strategy.get_state(user_id, thread_id).last_typing_sent = None
         await enqueue_status_update(bot, user_id, window_id, None, thread_id=thread_id)
     elif ws.has_seen_status:
         await _transition_to_idle(
@@ -234,7 +203,7 @@ async def _handle_no_status(
         await _send_typing_throttled(bot, user_id, thread_id)
         await update_topic_emoji(bot, chat_id, thread_id, "active", display)
         lifecycle_strategy.clear_autoclose_timer(user_id, thread_id)
-    elif now - ws.startup_time >= STARTUP_TIMEOUT:
+    elif terminal_strategy.is_startup_expired(window_id):
         terminal_strategy.mark_seen_status(window_id)
         await _transition_to_idle(
             bot, user_id, window_id, thread_id, chat_id, display, notif_mode
@@ -255,13 +224,12 @@ async def _scan_window_panes(
     thread_id: int,
 ) -> None:
     """Scan non-active panes for interactive prompts and surface alerts."""
-    now = time.monotonic()
-    ws = _get_window_state(window_id)
-    cached = ws.pane_count_cache
-    if cached and cached[1] > now and cached[0] <= 1:
-        return  # Cached single-pane — no subprocess needed
+    if terminal_strategy.is_single_pane_cached(window_id):
+        return
 
+    now = time.monotonic()
     panes = await tmux_manager.list_panes(window_id)
+    ws = terminal_strategy.get_state(window_id)
     ws.pane_count_cache = (len(panes), now + PANE_COUNT_TTL)
     live_pane_ids = {p.pane_id for p in panes}
 
@@ -333,7 +301,7 @@ async def _check_interactive_only(
     )
 
     if status is None:
-        ws = _get_window_state(window_id)
+        ws = terminal_strategy.get_state(window_id)
         clean_text = (
             ws.last_rendered_text if ws.last_rendered_text is not None else pane_text
         )
@@ -372,130 +340,7 @@ async def _maybe_check_passive_shell(
     await check_passive_shell_output(bot, user_id, thread_id, window_id, rendered)
 
 
-# ── Transcript discovery ─────────────────────────────────────────────────
-
-
-async def _maybe_discover_transcript(
-    window_id: str,
-    *,
-    _window: "TmuxWindow | None" = None,
-    bot: Bot | None = None,  # noqa: ARG001
-    user_id: int = 0,  # noqa: ARG001
-    thread_id: int = 0,  # noqa: ARG001
-) -> None:
-    """Discover and register transcript for hookless providers (Codex, Gemini)."""
-    from ..providers import registry
-
-    state = session_manager.window_states.get(window_id)
-    if not state:
-        return
-
-    w = _window or await tmux_manager.find_window_by_id(window_id)
-
-    if w and w.pane_current_command:
-        detected = await detect_provider_from_pane(
-            w.pane_current_command, pane_tty=w.pane_tty, window_id=window_id
-        )
-        if not detected and should_probe_pane_title_for_provider_detection(
-            w.pane_current_command
-        ):
-            pane_title = await tmux_manager.get_pane_title(window_id)
-            detected = detect_provider_from_runtime(
-                w.pane_current_command,
-                pane_title=pane_title,
-            )
-        if detected and detected != state.provider_name:
-            old_provider = state.provider_name
-            session_manager.set_window_provider(window_id, detected, cwd=w.cwd or None)
-            if detected == "shell":
-                state.transcript_path = ""  # shell has no transcripts
-                from ..providers.shell import setup_shell_prompt
-
-                await setup_shell_prompt(window_id, clear=False)
-            elif old_provider == "shell":
-                from .shell_capture import clear_shell_monitor_state
-
-                clear_shell_monitor_state(window_id)
-        elif not detected and state.transcript_path:
-            inferred = detect_provider_from_transcript_path(state.transcript_path)
-            if inferred and inferred != state.provider_name:
-                session_manager.set_window_provider(
-                    window_id,
-                    inferred,
-                    cwd=w.cwd or None,
-                )
-
-    if state.provider_name:
-        provider = get_provider_for_window(window_id)
-        if provider.capabilities.supports_hook:
-            return
-
-    if not state.cwd:
-        if not w or not w.cwd:
-            return
-        session_manager.set_window_provider(
-            window_id, state.provider_name or "", cwd=w.cwd
-        )
-
-    if state.provider_name:
-        provider = get_provider_for_window(window_id)
-        if provider.capabilities.name == "shell":
-            return
-        providers_to_try = [(provider.capabilities.name, provider)]
-    else:
-        if w and is_shell_prompt(w.pane_current_command):
-            session_manager.set_window_provider(window_id, "shell")
-            state.transcript_path = ""
-            from ..providers.shell import setup_shell_prompt
-
-            await setup_shell_prompt(window_id, clear=False)
-            return
-        providers_to_try = [
-            (name, registry.get(name))
-            for name in registry.provider_names()
-            if not registry.get(name).capabilities.supports_hook and name != "shell"
-        ]
-
-    pane_alive = w is not None and not is_shell_prompt(w.pane_current_command)
-
-    if is_foreign_window(window_id):
-        window_key = window_id
-    else:
-        window_key = f"{config.tmux_session_name}:{window_id}"
-    for provider_name, provider in providers_to_try:
-        max_age = 0 if pane_alive else None
-        event = await asyncio.to_thread(
-            provider.discover_transcript,
-            state.cwd,
-            window_key,
-            max_age=max_age,
-        )
-        if event:
-            if (
-                state.session_id == event.session_id
-                and state.transcript_path == event.transcript_path
-                and state.provider_name == provider_name
-            ):
-                return
-            session_manager.register_hookless_session(
-                window_id=window_id,
-                session_id=event.session_id,
-                cwd=event.cwd,
-                transcript_path=event.transcript_path,
-                provider_name=provider_name,
-            )
-            await asyncio.to_thread(
-                session_manager.write_hookless_session_map,
-                window_id=window_id,
-                session_id=event.session_id,
-                cwd=event.cwd,
-                transcript_path=event.transcript_path,
-                provider_name=provider_name,
-            )
-            return
-
-
-# ── Dead window / probe helpers ─────────────────────────────────────────
+# ── Dead window notification ─────────────────────────────────────────────
 
 
 async def _handle_dead_window_notification(
@@ -567,175 +412,6 @@ async def _handle_dead_window_notification(
     lifecycle_strategy.mark_dead_notified(user_id, thread_id, wid)
 
 
-# ── Autoclose timer management ────────────────────────────────────────────
-
-
-async def _check_autoclose_timers(bot: Bot) -> None:
-    """Close topics whose done/dead timers have expired."""
-    all_topics = lifecycle_strategy.iter_autoclose_timers()
-    if not all_topics:
-        return
-
-    now = time.monotonic()
-    expired: list[tuple[int, int]] = []
-    for user_id, thread_id, ts in all_topics:
-        if ts.autoclose is None:
-            continue
-        state, entered_at = ts.autoclose
-        if state == "done":
-            timeout = config.autoclose_done_minutes * 60
-        elif state == "dead":
-            timeout = config.autoclose_dead_minutes * 60
-        else:
-            continue
-        if timeout > 0 and now - entered_at >= timeout:
-            expired.append((user_id, thread_id))
-
-    for user_id, thread_id in expired:
-        await _close_expired_topic(bot, user_id, thread_id)
-
-
-async def _close_expired_topic(bot: Bot, user_id: int, thread_id: int) -> None:
-    """Attempt to close/delete an expired topic and clean up state."""
-    chat_id = thread_router.resolve_chat_id(user_id, thread_id)
-    window_id = thread_router.get_window_for_thread(user_id, thread_id)
-    removed = False
-    try:
-        await bot.delete_forum_topic(chat_id=chat_id, message_thread_id=thread_id)
-        removed = True
-    except TelegramError:
-        try:
-            await bot.close_forum_topic(chat_id=chat_id, message_thread_id=thread_id)
-            removed = True
-        except TelegramError as e:
-            logger.debug("Failed to auto-close topic thread=%d: %s", thread_id, e)
-    if removed:
-        lifecycle_strategy.clear_autoclose_timer(user_id, thread_id)
-        logger.info(
-            "Auto-removed topic: chat=%d thread=%d (user=%d)",
-            chat_id,
-            thread_id,
-            user_id,
-        )
-        await clear_topic_state(
-            user_id,
-            thread_id,
-            bot=bot,
-            window_id=window_id,
-            window_dead=True,
-        )
-        thread_router.unbind_thread(user_id, thread_id)
-
-
-# ── Unbound window TTL ────────────────────────────────────────────────────
-
-
-async def _check_unbound_window_ttl(live_windows: list | None = None) -> None:
-    """Kill unbound tmux windows whose TTL has expired."""
-    timeout = config.autoclose_done_minutes * 60
-    if timeout <= 0:
-        return
-
-    bound_ids: set[str] = set()
-    for _, _, wid in thread_router.iter_thread_bindings():
-        bound_ids.add(wid)
-
-    if live_windows is None:
-        live_windows = await tmux_manager.list_windows()
-    live_ids = {w.window_id for w in live_windows}
-
-    terminal_strategy.clear_unbound_timers(bound_ids, live_ids)
-
-    now = time.monotonic()
-    for w in live_windows:
-        if w.window_id not in bound_ids and not is_foreign_window(w.window_id):
-            ws = terminal_strategy.get_state(w.window_id)
-            if ws.unbound_timer is None:
-                terminal_strategy.set_unbound_timer(w.window_id, now)
-
-    await _kill_expired_unbound(now, timeout)
-    _prune_orphaned_poll_state(live_ids, bound_ids)
-
-
-async def _kill_expired_unbound(now: float, timeout: float) -> None:
-    """Find and kill unbound windows past their TTL."""
-    expired = terminal_strategy.get_expired_unbound(now, timeout)
-    for wid in expired:
-        await tmux_manager.kill_window(wid)
-
-        from ..config import config
-        from ..window_resolver import is_foreign_window
-        from .topic_state_registry import topic_state
-
-        topic_state.clear_window(wid)
-        qualified_id = (
-            wid if is_foreign_window(wid) else f"{config.tmux_session_name}:{wid}"
-        )
-        topic_state.clear_qualified(qualified_id)
-        logger.info("Auto-killed unbound window %s (TTL expired)", wid)
-
-
-def _prune_orphaned_poll_state(live_ids: set[str], bound_ids: set[str]) -> None:
-    """Remove poll state for windows that are neither live nor bound."""
-    for wid in terminal_strategy.get_orphaned_window_ids(live_ids, bound_ids):
-        clear_window_poll_state(wid)
-
-
-# ── Display name sync / state pruning ─────────────────────────────────────
-
-
-async def _prune_stale_state(live_windows: list) -> None:
-    """Sync display names and prune orphaned state entries."""
-    live_ids = {w.window_id for w in live_windows}
-    live_pairs = [(w.window_id, w.window_name) for w in live_windows]
-    session_manager.sync_display_names(live_pairs)
-    session_manager.prune_stale_state(live_ids)
-
-
-# ── Topic existence probing ───────────────────────────────────────────────
-
-
-async def _probe_topic_existence(bot: Bot) -> None:
-    """Probe all bound topics via Telegram API; detect deleted topics."""
-    for user_id, thread_id, wid in list(thread_router.iter_thread_bindings()):
-        if terminal_strategy.get_state(wid).probe_failures >= MAX_PROBE_FAILURES:
-            continue
-        try:
-            await bot.unpin_all_forum_topic_messages(
-                chat_id=thread_router.resolve_chat_id(user_id, thread_id),
-                message_thread_id=thread_id,
-            )
-            terminal_strategy.reset_probe_failures(wid)
-        except TelegramError as e:
-            if isinstance(e, BadRequest) and (
-                "Topic_id_invalid" in e.message
-                or "thread not found" in e.message.lower()
-            ):
-                w = await tmux_manager.find_window_by_id(wid)
-                if w:
-                    await tmux_manager.kill_window(w.window_id)
-                terminal_strategy.reset_probe_failures(wid)
-                await clear_topic_state(user_id, thread_id, bot, window_id=wid)
-                thread_router.unbind_thread(user_id, thread_id)
-                logger.info(
-                    "Topic deleted: killed window_id '%s' and "
-                    "unbound thread %d for user %d",
-                    wid,
-                    thread_id,
-                    user_id,
-                )
-            else:
-                count = lifecycle_strategy.record_probe_failure(wid)
-                if count < MAX_PROBE_FAILURES:
-                    log_throttled(
-                        logger,
-                        f"topic-probe:{wid}",
-                        "Topic probe error for %s: %s",
-                        wid,
-                        e,
-                    )
-
-
 # ── Main orchestration ──────────────────────────────────────────────────
 
 
@@ -767,7 +443,7 @@ async def update_status_message(
     # Passive vim INSERT mode tracking
     from ..tmux_manager import _has_insert_indicator, notify_vim_insert_seen
 
-    ws = _get_window_state(window_id)
+    ws = terminal_strategy.get_state(window_id)
     vim_text = ws.last_rendered_text if ws.last_rendered_text is not None else pane_text
     if _has_insert_indicator(vim_text):
         notify_vim_insert_seen(w.window_id)
@@ -827,64 +503,7 @@ async def update_status_message(
         )
 
 
-# ── Broker integration ────────────────────────────────────────────────────
-
-
-async def _run_broker_cycle(
-    bot: Bot | None = None,
-    idle_windows: frozenset[str] = frozenset(),
-) -> None:
-    """Run one broker delivery cycle (called from poll loop)."""
-    from .msg_broker import broker_delivery_cycle
-
-    from ..mailbox import Mailbox
-
-    mailbox = Mailbox(config.mailbox_dir)
-    await broker_delivery_cycle(
-        mailbox=mailbox,
-        tmux_mgr=tmux_manager,
-        window_states=session_manager.window_states,
-        tmux_session=config.tmux_session_name,
-        msg_rate_limit=config.msg_rate_limit,
-        mailbox_dir=config.mailbox_dir,
-        bot=bot,
-        idle_windows=idle_windows,
-    )
-
-
-def _run_mailbox_sweep() -> None:
-    """Run periodic mailbox sweep (called from poll loop)."""
-    from ..mailbox import Mailbox
-
-    mailbox = Mailbox(config.mailbox_dir)
-    removed = mailbox.sweep()
-    if removed:
-        logger.debug("Mailbox sweep removed %d messages", removed)
-
-
 # ── Main loop ─────────────────────────────────────────────────────────────
-
-
-async def _run_periodic_tasks(
-    bot: Bot,
-    all_windows: list["TmuxWindow"],
-    timers: dict[str, float],
-) -> None:
-    """Run time-gated periodic tasks (topic check, broker, sweep)."""
-    now = time.monotonic()
-    if now - timers["topic_check"] >= TOPIC_CHECK_INTERVAL:
-        timers["topic_check"] = now
-        await _prune_stale_state(all_windows)
-        await _probe_topic_existence(bot)
-        log_throttle_sweep()
-
-    if now - timers["broker"] >= BROKER_CYCLE_INTERVAL:
-        timers["broker"] = now
-        await _run_broker_cycle(bot)
-
-    if now - timers["sweep"] >= SWEEP_INTERVAL:
-        timers["sweep"] = now
-        _run_mailbox_sweep()
 
 
 async def status_poll_loop(bot: Bot) -> None:
@@ -901,7 +520,7 @@ async def status_poll_loop(bot: Bot) -> None:
                 w.window_id: w for w in all_windows
             }
 
-            await _run_periodic_tasks(bot, all_windows, timers)
+            await run_periodic_tasks(bot, all_windows, timers)
 
             for user_id, thread_id, wid in list(thread_router.iter_thread_bindings()):
                 structlog.contextvars.clear_contextvars()
@@ -917,7 +536,7 @@ async def status_poll_loop(bot: Bot) -> None:
                         )
                         continue
 
-                    await _maybe_discover_transcript(
+                    await discover_and_register_transcript(
                         wid,
                         _window=w,
                         bot=bot,
@@ -952,8 +571,7 @@ async def status_poll_loop(bot: Bot) -> None:
                         e,
                     )
 
-            await _check_autoclose_timers(bot)
-            await _check_unbound_window_ttl(all_windows)
+            await run_lifecycle_tasks(bot, all_windows)
 
         except _LoopError:
             logger.exception("Status poll loop error")

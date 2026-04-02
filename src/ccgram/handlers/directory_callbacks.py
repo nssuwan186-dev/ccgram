@@ -485,6 +485,18 @@ async def _wait_for_shell_ready(window_id: str, *, attempts: int = 5) -> None:
         await asyncio.sleep(0.2)
 
 
+def _try_install_messaging_skill(provider_name: str, cwd: str) -> None:
+    """Install the messaging skill for Claude windows (no-op for other providers)."""
+    if provider_name != "claude":
+        return
+    from ..msg_skill import ensure_skill_installed
+
+    try:
+        ensure_skill_installed(cwd)
+    except Exception:
+        logger.exception("Failed to install messaging skill at %s", cwd)
+
+
 async def _create_window_and_bind(
     query: CallbackQuery,
     user_id: int,
@@ -538,6 +550,8 @@ async def _create_window_and_bind(
 
         await _wait_for_shell_ready(created_wid)
         await setup_shell_prompt(created_wid)
+
+    _try_install_messaging_skill(provider_name, selected_path)
 
     if pending_thread_id is not None:
         thread_router.bind_thread(

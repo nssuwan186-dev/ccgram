@@ -68,7 +68,7 @@ Adjust status or transcript parsing:
 
 - routing/state (`session.py`)
 - monitor/parsing (`session_monitor.py`, providers, parsers)
-- delivery/UI (`handlers/*`, `message_queue.py`)
+- delivery/UI (`handlers/*`, `message_queue.py`, `live_view.py`, `periodic_tasks.py`)
 - integration boundary (`tmux_manager.py`, `hook.py`)
 
 2. Reproduce with narrow tests:

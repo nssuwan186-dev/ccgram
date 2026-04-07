@@ -49,13 +49,16 @@ Examples:
 
 - session/state changes -> `tests/ccgram/test_session.py`, `tests/ccgram/test_state_migration.py`
 - monitor/parsing changes -> `tests/ccgram/test_session_monitor.py`, `tests/ccgram/test_transcript_parser.py`
-- handlers/UI changes -> `tests/ccgram/test_text_handler.py`, `tests/ccgram/test_status_polling.py`, `tests/ccgram/test_bot_callbacks.py`
+- handlers/UI changes -> `tests/ccgram/test_text_handler.py`, `tests/ccgram/test_polling_coordinator.py`, `tests/ccgram/test_polling_strategies.py`, `tests/ccgram/test_bot_callbacks.py`
 - command changes -> `tests/ccgram/test_command_catalog.py`, `tests/ccgram/test_commands_command.py`, `tests/ccgram/test_cc_commands.py`
 - hook/event changes -> `tests/ccgram/test_hook.py`, `tests/ccgram/test_hook_events.py`, `tests/ccgram/test_session_monitor_events.py`
 - cleanup/lifecycle changes -> `tests/ccgram/test_cleanup.py`, `tests/ccgram/test_topic_emoji.py`
 - provider changes -> `tests/ccgram/test_provider_contracts.py`, `tests/ccgram/test_jsonl_providers.py`
 - shell/LLM changes -> `tests/ccgram/test_shell_provider.py`, `tests/ccgram/test_shell_commands.py`, `tests/ccgram/test_shell_capture.py`, `tests/ccgram/test_llm_completer.py`
 - voice changes -> `tests/ccgram/test_voice_handler.py`, `tests/ccgram/test_voice_callbacks.py`
+- live view changes -> `tests/ccgram/test_live_view.py`
+- polling/periodic changes -> `tests/ccgram/test_polling_coordinator.py`, `tests/ccgram/test_polling_strategies.py`
+- topic lifecycle changes -> `tests/ccgram/test_topic_orchestration.py`
 
 ## Quality Constraints
 

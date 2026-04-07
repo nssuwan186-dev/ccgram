@@ -49,6 +49,7 @@ The key implementation areas are:
 - command discovery: `src/ccgram/command_catalog.py`, `src/ccgram/cc_commands.py`
 - Telegram UI handlers: `src/ccgram/handlers/`
 - tmux integration: `src/ccgram/tmux_manager.py`
+- live view and periodic tasks: `src/ccgram/handlers/live_view.py`, `src/ccgram/handlers/periodic_tasks.py`
 
 ## Non-Negotiable Architecture Rules
 

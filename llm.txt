@@ -16,6 +16,7 @@ Core architecture invariants:
 - Per-window provider model: behavior/capabilities are resolved by window provider.
 - Parsing keeps full content; message splitting happens only in Telegram send layer.
 - tmux operations remain centralized in src/ccgram/tmux_manager.py.
+- Live view auto-refreshes terminal screenshots; content-hash gating prevents unnecessary API calls.
 
 Primary entrypoints:
 - src/ccgram/main.py (bootstrap)
@@ -27,12 +28,17 @@ Primary entrypoints:
 - src/ccgram/handlers/ (Telegram command/callback surface)
 - src/ccgram/command_catalog.py (provider-agnostic command discovery + caching)
 - src/ccgram/hook.py (Claude hook install/status/event writes)
+- src/ccgram/handlers/live_view.py (terminal live view)
+- src/ccgram/handlers/periodic_tasks.py (periodic task orchestration)
+- src/ccgram/claude_task_state.py (Claude task tracking)
+- src/ccgram/llm/summarizer.py (completion summaries)
 
 State and data files:
 - state.json: topic/thread bindings + window metadata
 - session_map.json: tmux window -> provider session mappings
 - events.jsonl: append-only hook events stream
 - monitor_state.json: incremental read offsets
+- mailbox/ : inter-agent message inboxes (per-window)
 
 Canonical project references:
 - README.md
@@ -41,6 +47,7 @@ Canonical project references:
 - .claude/rules/architecture.md
 - .claude/rules/topic-architecture.md
 - .claude/rules/message-handling.md
+- docs/ai-agents/ (AI agent orientation pack)
 
 Validation gate before done:
 - make check (runs fmt + lint + typecheck + test)

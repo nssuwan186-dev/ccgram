@@ -19,12 +19,13 @@ Monitoring and parsing:
 - `src/ccgram/session_monitor.py`: polling engine for sessions and hook events.
 - `src/ccgram/transcript_parser.py`: Claude transcript parsing and tool pairing.
 - `src/ccgram/terminal_parser.py`: terminal status/UI detection.
+- `src/ccgram/claude_task_state.py`: Claude task tracking from transcripts for live status bubble.
 
 Telegram handler surface:
 
 - `src/ccgram/handlers/text_handler.py`: text-path orchestrator.
 - `src/ccgram/handlers/message_queue.py`: ordering, merge rules, status conversion.
-- `src/ccgram/handlers/status_polling.py`: background status and stale-session cleanup.
+- `src/ccgram/handlers/polling_coordinator.py`: background status and stale-session cleanup.
 - `src/ccgram/handlers/directory_browser.py` + `directory_callbacks.py`: new-session UX.
 - `src/ccgram/handlers/interactive_ui.py` + `interactive_callbacks.py`: interactive prompt UX.
 - `src/ccgram/handlers/sessions_dashboard.py`: `/sessions` dashboard behavior.
@@ -41,6 +42,10 @@ Telegram handler surface:
 - `src/ccgram/handlers/command_history.py`: per-user/per-topic command recall (in-memory, max 20).
 - `src/ccgram/handlers/voice_handler.py`: voice message download, Whisper transcription, confirm/discard keyboard.
 - `src/ccgram/handlers/voice_callbacks.py`: voice callback routing (vc:send/vc:drop); shell provider transcriptions route through LLM.
+- `src/ccgram/handlers/live_view.py`: auto-refreshing terminal screenshots via editMessageMedia.
+- `src/ccgram/handlers/periodic_tasks.py`: periodic task orchestration (broker, sweep, lifecycle, live view).
+- `src/ccgram/handlers/topic_lifecycle.py`: autoclose timers for done/dead topics, unbound window TTL.
+- `src/ccgram/handlers/transcript_discovery.py`: hookless transcript discovery for Codex/Gemini.
 
 Provider and command surface:
 
@@ -56,7 +61,12 @@ Provider and command surface:
 Supporting modules:
 
 - `src/ccgram/screenshot.py`: terminal text → PNG rendering (PIL, ANSI color, font fallback).
-- `src/ccgram/codex_status.py`: Codex status snapshot from JSONL transcripts.
+- `src/ccgram/providers/codex_status.py`: Codex status snapshot from JSONL transcripts.
+- `src/ccgram/session_map.py`: session map I/O for session_map.json.
+- `src/ccgram/session_resolver.py`: JSONL session resolution and message history.
+- `src/ccgram/window_state_store.py`: per-window state (WindowState dataclass, mode settings).
+- `src/ccgram/state_persistence.py`: atomic/debounced JSON persistence.
+- `src/ccgram/telegram_request.py`: resilient HTTPX transport for Telegram long polling.
 
 ## Decision Map (Where to Edit)
 
@@ -77,7 +87,7 @@ Change provider behavior (commands, parsing, capabilities):
 - `src/ccgram/providers/base.py` for contract/capabilities.
 - `src/ccgram/providers/__init__.py` for per-window provider resolution.
 - `src/ccgram/providers/{claude,codex,gemini,shell}.py` for provider-specific behavior.
-- `src/ccgram/interactive_prompt_formatter.py` for provider-facing interactive prompt text normalization (currently Codex edit approval readability).
+- `src/ccgram/providers/codex_format.py` for provider-facing interactive prompt text normalization (currently Codex edit approval readability).
 
 Change shell command generation behavior:
 
@@ -93,6 +103,7 @@ Change Telegram interactive UX:
 - `src/ccgram/handlers/interactive_ui.py` and `interactive_callbacks.py`.
 - `src/ccgram/handlers/callback_data.py` for callback key contracts.
 - `src/ccgram/handlers/message_queue.py` for ordering/merge side effects.
+- `src/ccgram/handlers/live_view.py` for terminal live view sessions.
 
 Change command discovery:
 
@@ -129,6 +140,12 @@ Touch tmux behavior:
 
 - `src/ccgram/tmux_manager.py` only; avoid shell calls spread across handlers.
 
+Add or change live view behavior:
+
+- `src/ccgram/handlers/live_view.py` for view sessions and ticking logic.
+- `src/ccgram/handlers/periodic_tasks.py` for tick scheduling.
+- `src/ccgram/handlers/screenshot_callbacks.py` for Live button callback.
+
 ## Contracts You Must Not Break
 
 - Keep topic-window identity 1:1 and window-id keyed.
@@ -162,3 +179,9 @@ Symptom: commands menu missing/wrong
 
 - check `command_catalog.py` cache TTL and filesystem scan paths.
 - check `cc_commands.py` menu registration and provider scoping.
+
+Symptom: live view not refreshing
+
+- inspect `handlers/live_view.py` active views dict and tick interval.
+- check `handlers/periodic_tasks.py` for live view tick scheduling.
+- verify screenshot capture in `screenshot.py` and tmux pane availability.

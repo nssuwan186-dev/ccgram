@@ -26,8 +26,9 @@
 - `src/ccgram/providers/{claude,codex,gemini,shell}.py` implement provider-specific behavior.
 - `src/ccgram/command_catalog.py` discovers provider commands from filesystem (skills, custom commands) with 60s TTL caching.
 - `src/ccgram/cc_commands.py` registers discovered commands as Telegram bot menu entries.
-- `src/ccgram/interactive_prompt_formatter.py` normalizes provider interactive prompt text for Telegram readability (currently Codex edit approvals).
-- `src/ccgram/codex_status.py` extracts Codex status snapshots from JSONL transcripts.
+- `src/ccgram/providers/codex_format.py` normalizes provider interactive prompt text for Telegram readability (currently Codex edit approvals).
+- `src/ccgram/providers/codex_status.py` extracts Codex status snapshots from JSONL transcripts.
+- `src/ccgram/handlers/live_view.py` manages auto-refreshing terminal screenshots via editMessageMedia.
 - `src/ccgram/screenshot.py` renders terminal text to PNG (PIL, ANSI color, font fallback).
 
 4a. LLM command generation layer
@@ -45,6 +46,11 @@
 - `src/ccgram/whisper/__init__.py` resolves the active transcriber from config (provider, API key, model).
 - `src/ccgram/handlers/voice_handler.py` downloads voice audio, transcribes via Whisper, and shows confirm/discard keyboard.
 - `src/ccgram/handlers/voice_callbacks.py` handles confirm/discard callbacks; shell provider transcriptions route through the LLM for NL→command generation.
+
+4c. Completion summary layer
+
+- `src/ccgram/llm/summarizer.py` reads the session transcript and produces a single-line summary via LLM.
+- `src/ccgram/handlers/hook_events.py` triggers the summary on Stop events and edits the Ready message in-place.
 
 5. Integrations
 
@@ -83,9 +89,17 @@ Outbound agent output (provider transcript/event -> Telegram):
 3. `handlers/message_queue.py` enforces ordering, merge rules, and rate limits.
 4. Telegram send helpers deliver messages and status updates.
 
+Live view flow (terminal -> auto-refresh screenshots):
+
+1. User taps Live button in `handlers/screenshot_callbacks.py`.
+2. `handlers/live_view.py` registers an active view for the topic.
+3. `handlers/periodic_tasks.py` calls `live_view.tick()` every `config.live_view_interval` seconds.
+4. Each tick captures the pane via `tmux_manager.py`, hashes content, and edits the Telegram photo via `editMessageMedia` only when content changed.
+5. Auto-stops after `config.live_view_timeout` seconds of inactivity or when user taps Stop.
+
 Recovery flow (dead/missing session):
 
-1. `handlers/status_polling.py` detects stale/dead bindings.
+1. `handlers/polling_coordinator.py` detects stale/dead bindings.
 2. Recovery UI callbacks route through `handlers/recovery_callbacks.py`.
 3. Session/window state is updated in `session.py` and persisted to `state.json`.
 
